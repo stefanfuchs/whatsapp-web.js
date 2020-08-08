@@ -200,27 +200,32 @@ class Message extends Base {
         }
 
         const result = await this.client.pupPage.evaluate(async (msgId) => {
-            const msg = window.Store.Msg.get(msgId);
+            try {
+                const msg = window.Store.Msg.get(msgId);
 
-            if (msg.mediaData.mediaStage != 'RESOLVED') {
-                // try to resolve media
-                await msg.downloadMedia(true, 1);
+                if (msg.mediaData.mediaStage != 'RESOLVED') {
+                    // try to resolve media
+                    await msg.downloadMedia(true, 1);
+                }
+
+                if (msg.mediaData.mediaStage.includes('ERROR')) {
+                    // media could not be downloaded
+                    return undefined;
+                }
+
+                const buffer = await window.WWebJS.downloadBuffer(msg.clientUrl);
+                const decrypted = await window.Store.CryptoLib.decryptE2EMedia(msg.type, buffer, msg.mediaKey, msg.mimetype);
+                const data = await window.WWebJS.readBlobAsync(decrypted._blob);
+
+                return {
+                    data: data.split(',')[1],
+                    mimetype: msg.mimetype,
+                    filename: msg.filename
+                };
+
+            } catch (e) {
+                return null;
             }
-
-            if (msg.mediaData.mediaStage.includes('ERROR')) {
-                // media could not be downloaded
-                return undefined;
-            }
-
-            const buffer = await window.WWebJS.downloadBuffer(msg.clientUrl);
-            const decrypted = await window.Store.CryptoLib.decryptE2EMedia(msg.type, buffer, msg.mediaKey, msg.mimetype);
-            const data = await window.WWebJS.readBlobAsync(decrypted._blob);
-
-            return {
-                data: data.split(',')[1],
-                mimetype: msg.mimetype,
-                filename: msg.filename
-            };
 
         }, this.id._serialized);
 
