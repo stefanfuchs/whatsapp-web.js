@@ -1,6 +1,7 @@
 {
-  "name": "whatsapp-web.js",
-  "version": "1.8.0-post",
+  "name": "@stefanfuchs/whatsapp-web.js",
+  "publishConfig": { "registry": "https://npm.pkg.github.com/" },
+  "version": "1.8.0",
   "description": "Library for interacting with the WhatsApp Web API ",
   "main": "./index.js",
   "typings": "./index.d.ts",
@@ -11,7 +12,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pedroslopez/whatsapp-web.js.git"
+    "url": "git+https://github.com/stefanfuchs/whatsapp-web.js.git"
   },
   "keywords": [
     "whatsapp",
