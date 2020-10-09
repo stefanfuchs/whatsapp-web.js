@@ -57,6 +57,18 @@ class Chat extends Base {
          */
         this.archived = data.archive;
 
+        /**
+         * Indicates if the chat is muted or not
+         * @type {number}
+         */
+        this.isMuted = data.isMuted;
+
+        /**
+         * Unix timestamp for when the mute expires
+         * @type {number}
+         */
+        this.muteExpiration = data.muteExpiration;
+
         return super._patch(data);
     }
 
@@ -150,7 +162,7 @@ class Chat extends Base {
             }
 
             msgs.sort((a, b) => (a.t > b.t) ? 1 : -1);
-            return msgs.splice(msgs.length - limit).map(m => m.serialize());
+            return msgs.splice(msgs.length - limit).map(m => window.WWebJS.getMessageModel(m));
 
         }, this.id._serialized, searchOptions.limit);
 
