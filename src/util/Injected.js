@@ -166,12 +166,19 @@ exports.LoadUtils = () => {
         return mediaData;
     };
 
+    window.WWebJS.getMessageModel = message => {
+        const msg = message.serialize();
+        delete msg.pendingAckUpdate;
+        return msg;
+    };
+
     window.WWebJS.getChatModel = async chat => {
         if (!chat) return null;
 
         let res = chat.serialize();
         res.isGroup = chat.isGroup;
         res.formattedTitle = chat.formattedTitle;
+        res.isMuted = chat.mute && chat.mute.isMuted;
 
         if (chat.groupMetadata) {
             await window.Store.GroupMetadata.update(chat.id._serialized);
