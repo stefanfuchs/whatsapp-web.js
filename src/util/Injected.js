@@ -23,9 +23,12 @@ exports.ExposeStore = (moduleRaidStr) => {
     window.Store.MediaUpload = window.mR.findModule('uploadMedia')[0];
     window.Store.Cmd = window.mR.findModule('Cmd')[0].default;
     window.Store.MediaTypes = window.mR.findModule('msgToMediaType')[0];
+    window.Store.VCard = window.mR.findModule('vcardFromContactModel')[0];
     window.Store.UserConstructor = window.mR.findModule((module) => (module.default && module.default.prototype && module.default.prototype.isServer && module.default.prototype.isUser) ? module.default : null)[0].default;
     window.Store.Validators = window.mR.findModule('findLinks')[0];
     window.Store.WidFactory = window.mR.findModule('createWid')[0];
+    window.Store.BlockContact = window.mR.findModule('blockContact')[0];
+    window.Store.GroupMetadata = window.mR.findModule((module) => module.default && module.default.handlePendingInvite)[0].default;
 };
 
 exports.LoadUtils = () => {
@@ -78,6 +81,39 @@ exports.LoadUtils = () => {
             delete options.location;
         }
 
+        let vcardOptions = {};
+        if (options.contactCard) {
+            let contact = window.Store.Contact.get(options.contactCard);
+            vcardOptions = {
+                body: window.Store.VCard.vcardFromContactModel(contact).vcard,
+                type: 'vcard',
+                vcardFormattedName: contact.formattedName
+            };
+            delete options.contactCard;
+        } else if (options.contactCardList) {
+            let contacts = options.contactCardList.map(c => window.Store.Contact.get(c));
+            let vcards = contacts.map(c => window.Store.VCard.vcardFromContactModel(c));
+            vcardOptions = {
+                type: 'multi_vcard',
+                vcardList: vcards,
+                body: undefined
+            };
+            delete options.contactCardList;
+        } else if (options.parseVCards && typeof (content) === 'string' && content.startsWith('BEGIN:VCARD')) {
+            delete options.parseVCards;
+            try {
+                const parsed = window.Store.VCard.parseVcard(content);
+                if (parsed) {
+                    vcardOptions = {
+                        type: 'vcard',
+                        vcardFormattedName: window.Store.VCard.vcardGetNameFromParsed(parsed)
+                    };
+                }
+            } catch (_) {
+                // not a vcard
+            }
+        }
+
         if (options.linkPreview) {
             delete options.linkPreview;
             const link = window.Store.Validators.findLink(content);
@@ -90,8 +126,8 @@ exports.LoadUtils = () => {
         }
 
         const newMsgId = new window.Store.MsgKey({
-            from: window.Store.Conn.me,
-            to: chat.id,
+            fromMe: true,
+            remote: chat.id,
             id: window.Store.genId(),
         });
 
@@ -100,7 +136,7 @@ exports.LoadUtils = () => {
             id: newMsgId,
             ack: 0,
             body: content,
-            from: window.Store.Conn.me,
+            from: window.Store.Conn.wid,
             to: chat.id,
             local: true,
             self: 'out',
@@ -109,7 +145,8 @@ exports.LoadUtils = () => {
             type: 'chat',
             ...locationOptions,
             ...attOptions,
-            ...quotedMsgOptions
+            ...quotedMsgOptions,
+            ...vcardOptions
         };
 
         await window.Store.SendMessage.addAndSendMsgToChat(chat, message);
@@ -168,6 +205,10 @@ exports.LoadUtils = () => {
 
     window.WWebJS.getMessageModel = message => {
         const msg = message.serialize();
+        msg.isStatusV3 = message.isStatusV3;
+        if (msg.buttons) {
+            msg.buttons = msg.buttons.serialize();
+        }
         delete msg.pendingAckUpdate;
         return msg;
     };
@@ -184,6 +225,8 @@ exports.LoadUtils = () => {
             await window.Store.GroupMetadata.update(chat.id._serialized);
             res.groupMetadata = chat.groupMetadata.serialize();
         }
+
+        delete res.msgs;
 
         return res;
     };
@@ -217,6 +260,7 @@ exports.LoadUtils = () => {
         res.isGroup = contact.isGroup;
         res.isWAContact = contact.isWAContact;
         res.isMyContact = contact.isMyContact;
+        res.isBlocked = contact.isContactBlocked;
         res.userid = contact.userid;
 
         return res;
