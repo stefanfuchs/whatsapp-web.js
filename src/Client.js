@@ -123,11 +123,11 @@ class Client extends EventEmitter {
                 }
 
                 // Wait for QR Code
-
                 const QR_CANVAS_SELECTOR = 'canvas';
                 await page.waitForSelector(QR_CANVAS_SELECTOR, { timeout: this.options.qrTimeoutMs });
                 const qrImgData = await page.$eval(QR_CANVAS_SELECTOR, canvas => [].slice.call(canvas.getContext('2d').getImageData(0, 0, 264, 264).data));
                 const qr = jsQR(qrImgData, 264, 264).data;
+                
                 /**
                 * Emitted when the QR code is received
                 * @event Client#qr
@@ -335,7 +335,7 @@ class Client extends EventEmitter {
                 /**
                  * Emitted when the client has been disconnected
                  * @event Client#disconnected
-                 * @param {WAState} reason state that caused the disconnect
+                 * @param {WAState|"NAVIGATION"} reason reason that caused the disconnect
                  */
                 this.emit(Events.DISCONNECTED, state);
                 this.destroy();
@@ -373,6 +373,13 @@ class Client extends EventEmitter {
          * @event Client#ready
          */
         this.emit(Events.READY);
+
+        // Disconnect when navigating away
+        // Because WhatsApp Web now reloads when logging out from the device, this also covers that case
+        this.pupPage.on('framenavigated', async () => {
+            this.emit(Events.DISCONNECTED, 'NAVIGATION');
+            await this.destroy();
+        });
     }
 
     /**
