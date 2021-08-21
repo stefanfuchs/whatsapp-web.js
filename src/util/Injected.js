@@ -36,6 +36,7 @@ exports.ExposeStore = (moduleRaidStr) => {
     window.Store.QueryOrder = window.mR.findModule('queryOrder')[0];
     window.Store.QueryProduct = window.mR.findModule('queryProduct')[0];
     window.Store.DownloadManager = window.mR.findModule('DownloadManager')[0].default;
+    window.Store.Call = window.mR.findModule('CallCollection')[0].default;
 };
 
 exports.LoadUtils = () => {
@@ -58,14 +59,14 @@ exports.LoadUtils = () => {
         return false;
 
     };
-    
+
     window.WWebJS.sendMessage = async (chat, content, options = {}) => {
         let attOptions = {};
         if (options.attachment) {
-            attOptions = options.sendMediaAsSticker 
+            attOptions = options.sendMediaAsSticker
                 ? await window.WWebJS.processStickerData(options.attachment)
                 : await window.WWebJS.processMediaData(options.attachment, {
-                    forceVoice: options.sendAudioAsVoice, 
+                    forceVoice: options.sendAudioAsVoice,
                     forceDocument: options.sendMediaAsDocument,
                     forceGif: options.sendVideoAsGif
                 });
@@ -176,7 +177,7 @@ exports.LoadUtils = () => {
         if (mediaInfo.mimetype !== 'image/webp') throw new Error('Invalid media type');
 
         const file = window.WWebJS.mediaInfoToFile(mediaInfo);
-        let filehash = await window.WWebJS.getFileHash(file);	
+        let filehash = await window.WWebJS.getFileHash(file);
         let mediaKey = await window.WWebJS.generateHash(32);
 
         const controller = new AbortController();
@@ -262,18 +263,25 @@ exports.LoadUtils = () => {
 
     window.WWebJS.getMessageModel = message => {
         const msg = message.serialize();
-        
+
         msg.isStatusV3 = message.isStatusV3;
-        msg.links = (message.getLinks()).map(link => link.href);
+        msg.links = (message.getLinks()).map(link => ({
+            link: link.href,
+            isSuspicious: Boolean(link.suspiciousCharacters && link.suspiciousCharacters.size)
+        }));
 
         if (msg.buttons) {
             msg.buttons = msg.buttons.serialize();
         }
-        
+        if (msg.replyButtons) {
+            msg.replyButtons = msg.replyButtons.serialize();
+        }
+
         delete msg.pendingAckUpdate;
-        
+
         return msg;
     };
+
 
     window.WWebJS.getChatModel = async chat => {
         if (!chat) return null;
@@ -296,9 +304,10 @@ exports.LoadUtils = () => {
     };
 
     window.WWebJS.getChat = async chatId => {
-        const chat = window.Store.Chat.get(chatId);
+        const chatWid = window.Store.WidFactory.createWid(chatId);
+        const chat = await window.Store.Chat.find(chatWid);
         if (!chat) return null;
-
+        
         return await window.WWebJS.getChatModel(chat);
     };
 
@@ -330,8 +339,9 @@ exports.LoadUtils = () => {
         return res;
     };
 
-    window.WWebJS.getContact = contactId => {
-        const contact = window.Store.Contact.get(contactId);
+    window.WWebJS.getContact = async contactId => {
+        const wid = window.Store.WidFactory.createWid(contactId);
+        const contact = await window.Store.Contact.find(wid);
         return window.WWebJS.getContactModel(contact);
     };
 
@@ -358,15 +368,15 @@ exports.LoadUtils = () => {
 
     window.WWebJS.arrayBufferToBase64 = (arrayBuffer) => {
         let binary = '';
-        const bytes = new Uint8Array( arrayBuffer );
+        const bytes = new Uint8Array(arrayBuffer);
         const len = bytes.byteLength;
         for (let i = 0; i < len; i++) {
-            binary += String.fromCharCode( bytes[ i ] );
+            binary += String.fromCharCode(bytes[i]);
         }
-        return window.btoa( binary );
+        return window.btoa(binary);
     };
 
-    window.WWebJS.getFileHash = async (data) => {                  
+    window.WWebJS.getFileHash = async (data) => {
         let buffer = await data.arrayBuffer();
         const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
         return btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
@@ -376,7 +386,7 @@ exports.LoadUtils = () => {
         var result = '';
         var characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
         var charactersLength = characters.length;
-        for ( var i = 0; i < length; i++ ) {
+        for (var i = 0; i < length; i++) {
             result += characters.charAt(Math.floor(Math.random() * charactersLength));
         }
         return result;
@@ -402,17 +412,17 @@ exports.LoadUtils = () => {
 
     window.WWebJS.sendChatstate = async (state, chatId) => {
         switch (state) {
-        case 'typing':
-            await window.Store.Wap.sendChatstateComposing(chatId);
-            break;
-        case 'recording':
-            await window.Store.Wap.sendChatstateRecording(chatId);
-            break;
-        case 'stop':
-            await window.Store.Wap.sendChatstatePaused(chatId);
-            break;
-        default:
-            throw 'Invalid chatstate';
+            case 'typing':
+                await window.Store.Wap.sendChatstateComposing(chatId);
+                break;
+            case 'recording':
+                await window.Store.Wap.sendChatstateRecording(chatId);
+                break;
+            case 'stop':
+                await window.Store.Wap.sendChatstatePaused(chatId);
+                break;
+            default:
+                throw 'Invalid chatstate';
         }
 
         return true;
@@ -421,7 +431,7 @@ exports.LoadUtils = () => {
     window.WWebJS.getLabelModel = label => {
         let res = label.serialize();
         res.hexColor = label.hexColor;
-        
+
         return res;
     };
 
