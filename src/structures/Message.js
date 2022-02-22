@@ -391,7 +391,7 @@ class Message extends Base {
             if (!msg) return null;
 
             if (everyone && msg.id.fromMe && msg._canRevoke()) {
-                return window.Store.Cmd.sendRevokeMsgs(msg.chat, [msg], true);
+                return window.Store.Cmd.sendRevokeMsgs(msg.chat, [msg], {type: 'Sender'});
             }
 
             return window.Store.Cmd.sendDeleteMsgs(msg.chat, [msg], true);
