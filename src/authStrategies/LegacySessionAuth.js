@@ -54,7 +54,11 @@ class LegacySessionAuth extends BaseAuthStrategy {
             return window.Store.Features.features.MD_BACKEND;
         });
 
-        if(isMD) throw new Error('Authenticating via JSON session is not supported for MultiDevice-enabled WhatsApp accounts.');
+        if (isMD) {
+            // throw new Error('Authenticating via JSON session is not supported for MultiDevice-enabled WhatsApp accounts.');
+            console.log('[whatsapp-web.js] Authenticating via JSON session is not supported for MultiDevice-enabled WhatsApp accounts. Returning null session for now.');
+            return null;
+        }
 
         const localStorage = JSON.parse(await this.client.pupPage.evaluate(() => {
             return JSON.stringify(window.localStorage);
