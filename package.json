@@ -3,7 +3,7 @@
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
   },
-  "version": "1.16.5-rc1",
+  "version": "1.16.5-rc2",
   "description": "Library for interacting with the WhatsApp Web API ",
   "main": "./index.js",
   "typings": "./index.d.ts",
@@ -38,7 +38,7 @@
     "mime": "^3.0.0",
     "node-fetch": "^2.6.5",
     "node-webpmux": "^3.1.0",
-    "puppeteer": "^13.4.1"
+    "puppeteer": "13.4.1"
   },
   "devDependencies": {
     "@types/node-fetch": "^2.5.12",
