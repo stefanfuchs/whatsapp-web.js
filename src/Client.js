@@ -95,6 +95,13 @@ class Client extends EventEmitter {
             browser = await puppeteer.launch(puppeteerOpts);
             page = (await browser.pages())[0];
         }
+
+        // print browser console messages
+        // https://github.com/puppeteer/puppeteer/issues/1352
+        // page.on('console', (msg) => console.log('PAGE LOG:', msg.text()));
+        page.on('console', async msg => console[msg._type](
+            ...await Promise.all(msg.args().map(arg => arg.jsonValue()))
+        ));
       
         await page.setUserAgent(this.options.userAgent);
         if (this.options.bypassCSP) await page.setBypassCSP(true);
