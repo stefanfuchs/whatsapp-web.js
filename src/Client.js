@@ -10,7 +10,7 @@ const { WhatsWebURL, DefaultOptions, Events, WAState } = require('./util/Constan
 const { ExposeStore, LoadUtils } = require('./util/Injected');
 const ChatFactory = require('./factories/ChatFactory');
 const ContactFactory = require('./factories/ContactFactory');
-const { ClientInfo, Message, MessageMedia, Contact, Location, GroupNotification, Label, Call, Buttons, List } = require('./structures');
+const { ClientInfo, Message, MessageMedia, Contact, Location, GroupNotification, Label, Call, Buttons, List, Reaction } = require('./structures');
 const LegacySessionAuth = require('./authStrategies/LegacySessionAuth');
 const NoAuth = require('./authStrategies/NoAuth');
 
@@ -92,7 +92,12 @@ class Client extends EventEmitter {
             browser = await puppeteer.connect(puppeteerOpts);
             page = await browser.newPage();
         } else {
-            browser = await puppeteer.launch(puppeteerOpts);
+            const browserArgs = [...(puppeteerOpts.args || [])];
+            if(!browserArgs.find(arg => arg.includes('--user-agent'))) {
+                browserArgs.push(`--user-agent=${this.options.userAgent}`);
+            }
+
+            browser = await puppeteer.launch({...puppeteerOpts, args: browserArgs});
             page = (await browser.pages())[0];
         }
 
@@ -117,6 +122,52 @@ class Client extends EventEmitter {
             referer: 'https://whatsapp.com/'
         });
 
+        await page.evaluate(`function getElementByXpath(path) {
+            return document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+          }`);
+
+        let lastPercent = null,
+            lastPercentMessage = null;
+
+        await page.exposeFunction('loadingScreen', async (percent, message) => {
+            if (lastPercent !== percent || lastPercentMessage !== message) {
+                this.emit(Events.LOADING_SCREEN, percent, message);
+                lastPercent = percent;
+                lastPercentMessage = message;
+            }
+        });
+
+        await page.evaluate(
+            async function (selectors) {
+                var observer = new MutationObserver(function () {
+                    let progressBar = window.getElementByXpath(
+                        selectors.PROGRESS
+                    );
+                    let progressMessage = window.getElementByXpath(
+                        selectors.PROGRESS_MESSAGE
+                    );
+
+                    if (progressBar) {
+                        window.loadingScreen(
+                            progressBar.value,
+                            progressMessage.innerText
+                        );
+                    }
+                });
+
+                observer.observe(document, {
+                    attributes: true,
+                    childList: true,
+                    characterData: true,
+                    subtree: true,
+                });
+            },
+            {
+                PROGRESS: '//*[@id=\'app\']/div/div/div[2]/progress',
+                PROGRESS_MESSAGE: '//*[@id=\'app\']/div/div/div[3]',
+            }
+        );
+
         const INTRO_IMG_SELECTOR = '[data-testid="intro-md-beta-logo-dark"], [data-testid="intro-md-beta-logo-light"], [data-asset-intro-image-light="true"], [data-asset-intro-image-dark="true"]';
         const INTRO_QRCODE_SELECTOR = 'div[data-ref] canvas';
 
@@ -134,7 +185,7 @@ class Client extends EventEmitter {
             })
         ]);
 
-        // Checks if an error ocurred on the first found selector. The second will be discarded and ignored by .race;
+        // Checks if an error occurred on the first found selector. The second will be discarded and ignored by .race;
         if (needAuthentication instanceof Error) throw needAuthentication;
 
         // Scan-qrcode selector was found. Needs authentication
@@ -375,7 +426,7 @@ class Client extends EventEmitter {
             this.emit(Events.MEDIA_UPLOADED, message);
         });
 
-        await page.exposeFunction('onAppStateChangedEvent', (state) => {
+        await page.exposeFunction('onAppStateChangedEvent', async (state) => {
 
             /**
              * Emitted when the connection state changes
@@ -402,6 +453,7 @@ class Client extends EventEmitter {
                  * @event Client#disconnected
                  * @param {WAState|"NAVIGATION"} reason reason that caused the disconnect
                  */
+                await this.authStrategy.disconnect();
                 this.emit(Events.DISCONNECTED, state);
                 this.destroy();
             }
@@ -441,6 +493,27 @@ class Client extends EventEmitter {
             this.emit(Events.INCOMING_CALL, cll);
         });
 
+        await page.exposeFunction('onReaction', (reactions) => {
+            for (const reaction of reactions) {
+                /**
+                 * Emitted when a reaction is sent, received, updated or removed
+                 * @event Client#message_reaction
+                 * @param {object} reaction
+                 * @param {object} reaction.id - Reaction id
+                 * @param {number} reaction.orphan - Orphan
+                 * @param {?string} reaction.orphanReason - Orphan reason
+                 * @param {number} reaction.timestamp - Timestamp
+                 * @param {string} reaction.reaction - Reaction
+                 * @param {boolean} reaction.read - Read
+                 * @param {object} reaction.msgId - Parent message id
+                 * @param {string} reaction.senderId - Sender id
+                 * @param {?number} reaction.ack - Ack
+                 */
+
+                this.emit(Events.MESSAGE_REACTION, new Reaction(this, reaction));
+            }
+        });
+
         await page.evaluate(() => {
             window.Store.Msg.on('change', (msg) => { window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg)); });
             window.Store.Msg.on('change:type', (msg) => { window.onChangeMessageTypeEvent(window.WWebJS.getMessageModel(msg)); });
@@ -460,6 +533,22 @@ class Client extends EventEmitter {
                     }
                 }
             });
+            
+            {
+                const module = window.Store.createOrUpdateReactionsModule;
+                const ogMethod = module.createOrUpdateReactions;
+                module.createOrUpdateReactions = ((...args) => {
+                    window.onReaction(args[0].map(reaction => {
+                        const msgKey = window.Store.MsgKey.fromString(reaction.msgKey);
+                        const parentMsgKey = window.Store.MsgKey.fromString(reaction.parentMsgKey);
+                        const timestamp = reaction.timestamp / 1000;
+
+                        return {...reaction, msgKey, parentMsgKey, timestamp };
+                    }));
+
+                    return ogMethod(...args);
+                }).bind(module);
+            }
         });
 
         /**
@@ -467,11 +556,13 @@ class Client extends EventEmitter {
          * @event Client#ready
          */
         this.emit(Events.READY);
+        this.authStrategy.afterAuthReady();
 
         // Disconnect when navigating away when in PAIRING state (detect logout)
         this.pupPage.on('framenavigated', async () => {
             const appState = await this.getState();
             if(!appState || appState === WAState.PAIRING) {
+                await this.authStrategy.disconnect();
                 this.emit(Events.DISCONNECTED, 'NAVIGATION');
                 await this.destroy();
             }
@@ -483,6 +574,7 @@ class Client extends EventEmitter {
      */
     async destroy() {
         await this.pupBrowser.close();
+        await this.authStrategy.destroy();
     }
 
     /**
@@ -587,7 +679,7 @@ class Client extends EventEmitter {
             internalOptions.list = content;
             content = '';
         }
-
+        
         if (internalOptions.sendMediaAsSticker && internalOptions.attachment) {
             internalOptions.attachment = await Util.formatToWebpSticker(
                 internalOptions.attachment, {
@@ -751,7 +843,7 @@ class Client extends EventEmitter {
 
         return couldSet;
     }
-
+    
     /**
      * Gets the current connection state for the client
      * @returns {WAState} 
@@ -904,7 +996,13 @@ class Client extends EventEmitter {
      */
     async getCommonGroups(contactId) {
         const commonGroups = await this.pupPage.evaluate(async (contactId) => {
-            const contact = window.Store.Contact.get(contactId);
+            let contact = window.Store.Contact.get(contactId);
+            if (!contact) {
+                const wid = window.Store.WidFactory.createUserWid(contactId);
+                const chatConstructor = window.Store.Contact.getModelsArray().find(c=>!c.isGroup).constructor;
+                contact = new chatConstructor({id: wid});
+            }
+
             if (contact.commonGroups) {
                 return contact.commonGroups.serialize();
             }

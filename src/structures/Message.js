@@ -336,6 +336,20 @@ class Message extends Base {
     }
 
     /**
+     * React to this message with an emoji
+     * @param {string} reaction - Emoji to react with. Send an empty string to remove the reaction.
+     * @return {Promise}
+     */
+    async react(reaction){
+        await this.client.pupPage.evaluate(async (messageId, reaction) => {
+            if (!messageId) { return undefined; }
+            
+            const msg = await window.Store.Msg.get(messageId);
+            await window.Store.sendReactionToMsg(msg, reaction);
+        }, this.id._serialized, reaction);
+    }
+
+    /**
      * Accept Group V4 Invite
      * @returns {Promise<Object>}
      */
@@ -344,7 +358,7 @@ class Message extends Base {
     }
 
     /**
-     * Forwards this message to another chat
+     * Forwards this message to another chat (that you chatted before, otherwise it will fail)
      *
      * @param {string|Chat} chat Chat model or chat ID to which the message will be forwarded
      * @returns {Promise}
@@ -397,12 +411,13 @@ class Message extends Base {
                     signal: (new AbortController).signal
                 });
 
-                const data = window.WWebJS.arrayBufferToBase64(decryptedMedia);
+                const data = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia);
 
                 return {
                     data,
                     mimetype: msg.mimetype,
-                    filename: msg.filename
+                    filename: msg.filename,
+                    filesize: msg.size
                 };
             } catch (e) {
                 if(e.status && e.status === 404) return undefined;
@@ -411,20 +426,20 @@ class Message extends Base {
         }, this.id._serialized);
 
         if (!result) return undefined;
-        return new MessageMedia(result.mimetype, result.data, result.filename);
+        return new MessageMedia(result.mimetype, result.data, result.filename, result.filesize);
     }
 
     /**
      * Deletes a message from the chat
-     * @param {?boolean} everyone If true and the message is sent by the current user, will delete it for everyone in the chat.
+     * @param {?boolean} everyone If true and the message is sent by the current user or the user is an admin, will delete it for everyone in the chat.
      */
     async delete(everyone) {
         await this.client.pupPage.evaluate((msgId, everyone) => {
             let msg = window.Store.Msg.get(msgId);
             if (!msg) return null;
 
-            if (everyone && msg.id.fromMe && msg._canRevoke()) {
-                return window.Store.Cmd.sendRevokeMsgs(msg.chat, [msg], {type: 'Sender'});
+            if (everyone && msg._canRevoke()) {
+                return window.Store.Cmd.sendRevokeMsgs(msg.chat, [msg], { type: msg.id.fromMe ? 'Sender' : 'Admin' });
             }
 
             return window.Store.Cmd.sendDeleteMsgs(msg.chat, [msg], true);
@@ -439,7 +454,7 @@ class Message extends Base {
             let msg = window.Store.Msg.get(msgId);
 
             if (msg.canStar()) {
-                return msg.chat.sendStarMsgs([msg], true);
+                return window.Store.Cmd.sendStarMsgs(msg.chat, [msg], false);
             }
         }, this.id._serialized);
     }
@@ -452,7 +467,7 @@ class Message extends Base {
             let msg = window.Store.Msg.get(msgId);
 
             if (msg.canStar()) {
-                return msg.chat.sendStarMsgs([msg], false);
+                return window.Store.Cmd.sendUnstarMsgs(msg.chat, [msg], false);
             }
         }, this.id._serialized);
     }
