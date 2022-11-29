@@ -305,14 +305,11 @@ class Message extends Base {
         if (!this.hasQuotedMsg) return undefined;
 
         const quotedMsg = await this.client.pupPage.evaluate((msgId) => {
-            let msg = window.Store.Msg.get(msgId);
-            let quotedMsgObj = ('quotedMsgObj' in msg) ? msg.quotedMsgObj() : msg.getRawQuotedMsgObj();
-            if (!quotedMsgObj) return undefined;
-
-            return quotedMsgObj.serialize();
+            const msg = window.Store.Msg.get(msgId);
+            const quotedMsg = window.Store.QuotedMsg.getQuotedMsgObj(msg);
+            return window.WWebJS.getMessageModel(quotedMsg);
         }, this.id._serialized);
 
-        if (!quotedMsg) return undefined;
         return new Message(this.client, quotedMsg);
     }
 
@@ -442,7 +439,8 @@ class Message extends Base {
             let msg = window.Store.Msg.get(msgId);
             if (!msg) return null;
 
-            if (everyone && msg._canRevoke()) {
+            const canRevoke = window.Store.MsgActionChecks.canSenderRevokeMsg(msg) || window.Store.MsgActionChecks.canAdminRevokeMsg(msg);
+            if (everyone && canRevoke) {
                 return window.Store.Cmd.sendRevokeMsgs(msg.chat, [msg], { type: msg.id.fromMe ? 'Sender' : 'Admin' });
             }
 
@@ -457,7 +455,7 @@ class Message extends Base {
         await this.client.pupPage.evaluate((msgId) => {
             let msg = window.Store.Msg.get(msgId);
 
-            if (msg.canStar()) {
+            if (window.Store.MsgActionChecks.canStarMsg(msg)) {
                 return window.Store.Cmd.sendStarMsgs(msg.chat, [msg], false);
             }
         }, this.id._serialized);
@@ -470,7 +468,7 @@ class Message extends Base {
         await this.client.pupPage.evaluate((msgId) => {
             let msg = window.Store.Msg.get(msgId);
 
-            if (msg.canStar()) {
+            if (window.Store.MsgActionChecks.canStarMsg(msg)) {
                 return window.Store.Cmd.sendUnstarMsgs(msg.chat, [msg], false);
             }
         }, this.id._serialized);
