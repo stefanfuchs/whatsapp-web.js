@@ -440,7 +440,7 @@ declare namespace WAWebJS {
         /** User agent to use in puppeteer.
          * @default 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.109 Safari/537.36' */
         userAgent?: string
-        /** Ffmpeg path to use when formating videos to webp while sending stickers 
+        /** Ffmpeg path to use when formatting videos to webp while sending stickers 
          * @default 'ffmpeg' */
         ffmpegPath?: string,
         /** Object with proxy autentication requirements @default: undefined */
@@ -981,17 +981,19 @@ declare namespace WAWebJS {
          * The custom message secret, can be used as a poll ID
          * @note It has to be a unique vector with a length of 32
          */
-        messageSecret: ?Array<number>
+        messageSecret: Array<number>|undefined
     }
 
     /** Represents a Poll on WhatsApp */
-    export interface Poll {
-        pollName: string,
+    export class Poll {
+        pollName: string
         pollOptions: Array<{
             name: string,
             localId: number
-        }>,
+        }>
         options: PollSendOptions
+
+        constructor(pollName: string, pollOptions: Array<string>, options?: PollSendOptions)
     }
 
     export interface Label {
@@ -1189,13 +1191,84 @@ declare namespace WAWebJS {
         user: string,
         _serialized: string,
     }
+    
+    export interface BusinessCategory {
+        id: string,
+        localized_display_name: string,
+    }
+
+    export interface BusinessHoursOfDay {
+        mode: string,
+        hours: number[] 
+    }
+    
+    export interface BusinessHours {
+        config: {
+            sun: BusinessHoursOfDay,
+            mon: BusinessHoursOfDay,
+            tue: BusinessHoursOfDay,
+            wed: BusinessHoursOfDay,
+            thu: BusinessHoursOfDay,
+            fri: BusinessHoursOfDay,
+        }
+        timezone: string,
+    }
+    
+    
 
     export interface BusinessContact extends Contact {
         /** 
          * The contact's business profile
-         * @todo add a more specific type for the object
          */
-        businessProfile: object
+        businessProfile: {
+            /** The contact's business profile id */
+            id: ContactId,
+
+            /** The contact's business profile tag */
+            tag: string,
+
+            /** The contact's business profile description */
+            description: string,
+
+            /** The contact's business profile categories */
+            categories: BusinessCategory[],
+
+            /** The contact's business profile options */
+            profileOptions: {
+                /** The contact's business profile commerce experience*/
+                commerceExperience: string,
+                
+                /** The contact's business profile cart options */
+                cartEnabled: boolean,
+            }
+
+            /** The contact's business profile email */
+            email: string,
+
+            /** The contact's business profile websites */
+            website: string[],
+
+            /** The contact's business profile latitude */
+            latitude: number,
+            
+            /** The contact's business profile longitude */
+            longitude: number,
+            
+            /** The contact's business profile work hours*/
+            businessHours: BusinessHours
+            
+            /** The contact's business profile address */
+            address: string,
+            
+            /** The contact's business profile facebook page */
+            fbPage: object,
+            
+            /** Indicate if the contact's business profile linked */
+            ifProfileLinked: boolean
+            
+            /** The contact's business profile coverPhoto */
+            coverPhoto: null | any,
+        }
     }
 
     export interface PrivateContact extends Contact {
@@ -1341,7 +1414,7 @@ declare namespace WAWebJS {
             code: number;
             message: string;
             isInviteV4Sent: boolean,
-        };
+        }
     };
 
     /** An object that handles options for adding participants */
@@ -1410,7 +1483,7 @@ declare namespace WAWebJS {
         /** Group participants */
         participants: Array<GroupParticipant>;
         /** Adds a list of participants by ID to the group */
-        addParticipants: (participantIds: string|string[], options?: AddParticipantsOptions) => Promise<Object.<string, AddParticipantsResult>|string>;
+        addParticipants: (participantIds: string | string[], options?: AddParticipantsOptions) => Promise<{ [key: string]: AddParticipantsResult } | string>;
         /** Removes a list of participants by ID to the group */
         removeParticipants: (participantIds: string[]) => Promise<{ status: number }>;
         /** Promotes participants by IDs to admins */

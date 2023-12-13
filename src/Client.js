@@ -30,7 +30,7 @@ const NoAuth = require('./authStrategies/NoAuth');
  * @param {number} options.takeoverOnConflict - If another whatsapp web session is detected (another browser), take over the session in the current browser
  * @param {number} options.takeoverTimeoutMs - How much time to wait before taking over the session
  * @param {string} options.userAgent - User agent to use in puppeteer
- * @param {string} options.ffmpegPath - Ffmpeg path to use when formating videos to webp while sending stickers 
+ * @param {string} options.ffmpegPath - Ffmpeg path to use when formatting videos to webp while sending stickers 
  * @param {boolean} options.bypassCSP - Sets bypassing of page's Content-Security-Policy.
  * @param {object} options.proxyAuthentication - Proxy Authentication object.
  * 
@@ -43,6 +43,7 @@ const NoAuth = require('./authStrategies/NoAuth');
  * @fires Client#message_create
  * @fires Client#message_revoke_me
  * @fires Client#message_revoke_everyone
+ * @fires Client#message_edit
  * @fires Client#media_uploaded
  * @fires Client#group_join
  * @fires Client#group_leave
@@ -672,7 +673,7 @@ class Client extends EventEmitter {
             window.Store.Msg.on('change:ack', (msg, ack) => { window.onMessageAckEvent(window.WWebJS.getMessageModel(msg), ack); });
             window.Store.Msg.on('change:isUnsentMedia', (msg, unsent) => { if (msg.id.fromMe && !unsent) window.onMessageMediaUploadedEvent(window.WWebJS.getMessageModel(msg)); });
             window.Store.Msg.on('remove', (msg) => { if (msg.isNewMsg) window.onRemoveMessageEvent(window.WWebJS.getMessageModel(msg)); });
-            window.Store.Msg.on('change:body', (msg, newBody, prevBody) => { window.onEditMessageEvent(window.WWebJS.getMessageModel(msg), newBody, prevBody); });
+            window.Store.Msg.on('change:body change:caption', (msg, newBody, prevBody) => { window.onEditMessageEvent(window.WWebJS.getMessageModel(msg), newBody, prevBody); });
             window.Store.AppState.on('change:state', (_AppState, state) => { window.onAppStateChangedEvent(state); });
             window.Store.Conn.on('change:battery', (state) => { window.onBatteryStateChangedEvent(state); });
             window.Store.Call.on('add', (call) => { window.onIncomingCall(call); });
@@ -898,7 +899,7 @@ class Client extends EventEmitter {
 
 
             if (sendSeen) {
-                window.WWebJS.sendSeen(chatId);
+                await window.WWebJS.sendSeen(chatId);
             }
 
             const msg = await window.WWebJS.sendMessage(chat, message, options, sendSeen);
