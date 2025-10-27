@@ -1232,11 +1232,18 @@ class Client extends EventEmitter {
             
             const msgs = await window.Store.PinnedMsgUtils.getTable().equals(['chatId'], chatWid.toString());
 
-            const pinnedMsgs = msgs.map((msg) => window.Store.Msg.get(msg.parentMsgKey));
+            const pinnedMsgs = (
+                await Promise.all(
+                    msgs.filter(msg => msg.pinType == 1).map(async (msg) => {
+                        const res = await window.Store.Msg.getMessagesById([msg.parentMsgKey]);
+                        return res?.messages?.[0];
+                    })
+                )
+            ).filter(Boolean);
 
             return !pinnedMsgs.length
                 ? []
-                : pinnedMsgs.map((msg) => window.WWebJS.getMessageModel(msg));
+                : await Promise.all(pinnedMsgs.map((msg) => window.WWebJS.getMessageModel(msg)));
         }, chatId);
 
         return pinnedMsgs.map((msg) => new Message(this, msg));
@@ -2362,6 +2369,83 @@ class Client extends EventEmitter {
                 };
             }));
         }, userIds);
+    }
+
+    /**
+     * Add or edit a customer note
+     * @see https://faq.whatsapp.com/1433099287594476
+     * @param {string} userId The ID of a customer to add a note to
+     * @param {string} note The note to add
+     * @returns {Promise<void>}
+     */
+    async addOrEditCustomerNote(userId, note) {
+        return await this.pupPage.evaluate(async (userId, note) => {
+            if (!window.Store.BusinessGatingUtils.smbNotesV1Enabled()) return;
+
+            return window.Store.CustomerNoteUtils.noteAddAction(
+                'unstructured',
+                window.Store.WidToJid.widToUserJid(window.Store.WidFactory.createWid(userId)),
+                note
+            );
+        }, userId, note);
+    }
+
+    /**
+     * Get a customer note
+     * @see https://faq.whatsapp.com/1433099287594476
+     * @param {string} userId The ID of a customer to get a note from
+     * @returns {Promise<{
+     *    chatId: string,
+     *    content: string,
+     *    createdAt: number,
+     *    id: string,
+     *    modifiedAt: number,
+     *    type: string
+     * }>}
+     */
+    async getCustomerNote(userId) {
+        return await this.pupPage.evaluate(async (userId) => {
+            if (!window.Store.BusinessGatingUtils.smbNotesV1Enabled()) return null;
+
+            const note = await window.Store.CustomerNoteUtils.retrieveOnlyNoteForChatJid(
+                window.Store.WidToJid.widToUserJid(window.Store.WidFactory.createWid(userId))
+            );
+
+            let serialized = note?.serialize();
+
+            if (!serialized) return null;
+
+            serialized.chatId = window.Store.JidToWid.userJidToUserWid(serialized.chatJid)._serialized;
+            delete serialized.chatJid;
+
+            return serialized;
+        }, userId);
+    }
+    
+    /**
+     * Get Poll Votes
+     * @param {string} messageId
+     * @return {Promise<Array<PollVote>>} 
+     */
+    async getPollVotes(messageId) {
+        const msg = await this.getMessageById(messageId);
+        if (!msg) return [];
+        if (msg.type != 'poll_creation') throw 'Invalid usage! Can only be used with a pollCreation message';
+
+        const pollVotes = await this.pupPage.evaluate( async (msg) => {
+            const msgKey = window.Store.MsgKey.fromString(msg.id._serialized);
+            let pollVotes = await window.Store.PollsVotesSchema.getTable().equals(['parentMsgKey'], msgKey.toString());
+            
+            return pollVotes.map(item => {
+                const typedArray = new Uint8Array(item.selectedOptionLocalIds);
+                return {
+                    ...item,
+                    selectedOptionLocalIds: Array.from(typedArray)
+                };
+            });
+        }, msg);
+
+        return pollVotes.map((pollVote) => new PollVote(this.client, {...pollVote, parentMessage: msg}));
     }
 }
 
