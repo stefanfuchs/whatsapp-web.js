@@ -370,84 +370,173 @@ class Client extends EventEmitter {
     /**
      * Sets up events and requirements, kicks off authentication request
      */
-    async initialize() {
+/**
+ * Sets up events and requirements, kicks off authentication request
+ */
+async initialize() {
+    let browser, page;
+    browser = null;
+    page = null;
 
-        let 
-            /**
-             * @type {puppeteer.Browser}
-             */
-            browser, 
-            /**
-             * @type {puppeteer.Page}
-             */
-            page;
+    await this.authStrategy.beforeBrowserInitialized();
 
-        browser = null;
-        page = null;
+    const puppeteerOpts = this.options.puppeteer;
+    
+    // ✅ DYNAMIC: Get stealth configuration with defaults
+    const stealthConfig = {
+        useAutomationFlags: this.options.useAutomationFlags ?? true,
+        stealthLevel: this.options.stealthLevel || 'medium',
+        usePageStealth: this.options.usePageStealth ?? true,
+        removeWebdriver: this.options.removeWebdriver ?? true
+    };
 
-        await this.authStrategy.beforeBrowserInitialized();
-
-        const puppeteerOpts = this.options.puppeteer;
-        if (puppeteerOpts && (puppeteerOpts.browserWSEndpoint || puppeteerOpts.browserURL)) {
-            browser = await puppeteer.connect(puppeteerOpts);
-            page = await browser.newPage();
-        } else {
-            const browserArgs = [...(puppeteerOpts.args || [])];
-            if(!browserArgs.find(arg => arg.includes('--user-agent'))) {
-                browserArgs.push(`--user-agent=${this.options.userAgent}`);
-            }
-            // navigator.webdriver fix
-            browserArgs.push('--disable-blink-features=AutomationControlled');
-
-            browser = await puppeteer.launch({...puppeteerOpts, args: browserArgs});
-            page = (await browser.pages())[0];
-        }
-
-        if (this.options.proxyAuthentication !== undefined) {
-            await page.authenticate(this.options.proxyAuthentication);
-        }
-      
-        await page.setUserAgent(this.options.userAgent);
-        if (this.options.bypassCSP) await page.setBypassCSP(true);
-
-        this.pupBrowser = browser;
-        this.pupPage = page;
-
-        await this.authStrategy.afterBrowserInitialized();
-        await this.initWebVersionCache();
-
-        // ocVersion (isOfficialClient patch)
-        // remove after 2.3000.x hard release
-        await page.evaluateOnNewDocument(() => {
-            const originalError = Error;
-            window.originalError = originalError;
-            //eslint-disable-next-line no-global-assign
-            Error = function (message) {
-                const error = new originalError(message);
-                const originalStack = error.stack;
-                if (error.stack.includes('moduleRaid')) error.stack = originalStack + '\n    at https://web.whatsapp.com/vendors~lazy_loaded_low_priority_components.05e98054dbd60f980427.js:2:44';
-                return error;
-            };
-        });
+    if (puppeteerOpts && (puppeteerOpts.browserWSEndpoint || puppeteerOpts.browserURL)) {
+        browser = await puppeteer.connect(puppeteerOpts);
+        page = await browser.newPage();
+    } else {
+        const browserArgs = [...(puppeteerOpts.args || [])];
         
-        await page.goto(WhatsWebURL, {
-            waitUntil: 'load',
-            timeout: 0,
-            referer: 'https://whatsapp.com/'
-        });
+        // ✅ DYNAMIC: Add user agent if not present
+        if(!browserArgs.find(arg => arg.includes('--user-agent'))) {
+            browserArgs.push(`--user-agent=${this.options.userAgent}`);
+        }
+        
+        // ✅ DYNAMIC: Only add automation flags if enabled
+        if (stealthConfig.useAutomationFlags) {
+            browserArgs.push('--disable-blink-features=AutomationControlled');
+        }
+        
+        // ✅ DYNAMIC: Add additional stealth args based on level
+        const additionalArgs = this.getStealthBrowserArgs(stealthConfig.stealthLevel);
+        browserArgs.push(...additionalArgs);
 
+        browser = await puppeteer.launch({
+            ...puppeteerOpts, 
+            args: browserArgs,
+            // ✅ DYNAMIC: Remove automation indicators from default args
+            ignoreDefaultArgs: stealthConfig.useAutomationFlags ? ['--enable-automation'] : []
+        });
+        page = (await browser.pages())[0];
+    }
+
+    if (this.options.proxyAuthentication !== undefined) {
+        await page.authenticate(this.options.proxyAuthentication);
+    }
+  
+    await page.setUserAgent(this.options.userAgent);
+    if (this.options.bypassCSP) await page.setBypassCSP(true);
+
+    this.pupBrowser = browser;
+    this.pupPage = page;
+
+    // ✅ DYNAMIC: Apply page stealth if enabled
+    if (stealthConfig.usePageStealth) {
+        await this.applyPageStealth(page, stealthConfig);
+    }
+
+    await this.authStrategy.afterBrowserInitialized();
+    await this.initWebVersionCache();
+
+    // ocVersion (isOfficialClient patch)
+    // remove after 2.3000.x hard release
+    await page.evaluateOnNewDocument(() => {
+        const originalError = Error;
+        window.originalError = originalError;
+        //eslint-disable-next-line no-global-assign
+        Error = function (message) {
+            const error = new originalError(message);
+            const originalStack = error.stack;
+            if (error.stack.includes('moduleRaid')) error.stack = originalStack + '\n    at https://web.whatsapp.com/vendors~lazy_loaded_low_priority_components.05e98054dbd60f980427.js:2:44';
+            return error;
+        };
+    });
+    
+    await page.goto(WhatsWebURL, {
+        waitUntil: 'load',
+        timeout: 0,
+        referer: 'https://whatsapp.com/'
+    });
+
+    await this.inject();
+
+    this.pupPage.on('framenavigated', async (frame) => {
+        if(frame.url().includes('post_logout=1') || this.lastLoggedOut) {
+            this.emit(Events.DISCONNECTED, 'LOGOUT');
+            await this.authStrategy.logout();
+            await this.authStrategy.beforeBrowserInitialized();
+            await this.authStrategy.afterBrowserInitialized();
+            this.lastLoggedOut = false;
+        }
         await this.inject();
+    });
+}
 
-        this.pupPage.on('framenavigated', async (frame) => {
-            if(frame.url().includes('post_logout=1') || this.lastLoggedOut) {
-                this.emit(Events.DISCONNECTED, 'LOGOUT');
-                await this.authStrategy.logout();
-                await this.authStrategy.beforeBrowserInitialized();
-                await this.authStrategy.afterBrowserInitialized();
-                this.lastLoggedOut = false;
+/**
+ * Get additional browser args based on stealth level
+ */
+getStealthBrowserArgs(stealthLevel) {
+    const stealthArgs = {
+        low: [
+            // Minimal stealth
+            '--no-first-run',
+            '--no-default-browser-check'
+        ],
+        medium: [
+            // Moderate stealth
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-background-timer-throttling',
+            '--disable-popup-blocking'
+        ],
+        high: [
+            // Maximum stealth
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-background-timer-throttling',
+            '--disable-popup-blocking',
+            '--disable-translate',
+            '--disable-extensions',
+            '--remote-debugging-port=0'
+        ]
+    };
+    
+    return stealthArgs[stealthLevel] || stealthArgs.medium;
+}
+
+/**
+ * Apply stealth techniques to the page
+ */
+    async applyPageStealth(page, stealthConfig) {
+        await page.evaluateOnNewDocument((config) => {
+            // ✅ DYNAMIC: Only remove webdriver if enabled
+            if (config.removeWebdriver) {
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
             }
-            await this.inject();
+
+            // Always apply basic stealth that's safe
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5],
+            });
+
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en'],
+            });
+        }, stealthConfig);
+
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
         });
+
+
     }
 
     /**
@@ -492,513 +581,521 @@ class Client extends EventEmitter {
      * Private function
      * @property {boolean} reinject is this a reinject?
      */
-    async attachEventListeners() {
-        // ✅ ADD: Prevent duplicate event listener attachment
-        if (this._listenersAttached) {
-            console.log('Event listeners already attached, cleaning up first...');
-            await this._cleanupEventListeners();
-        }
-        
-        // ✅ ADD: Initialize tracking for attached listeners
-        this._attachedListeners = [];
-
-        // ✅ OPTIMIZED: High-performance safe handler with rate limiting
-        const createOptimizedHandler = (handler) => {
-            let callCount = 0;
-            let lastCallTime = 0;
-            const MAX_CALLS_PER_SECOND = 100; // Rate limiting
-            
-            return (...args) => {
-                try {
-                    // ✅ Rate limiting for high-frequency events
-                    const now = Date.now();
-                    if (now - lastCallTime > 1000) {
-                        callCount = 0;
-                        lastCallTime = now;
-                    }
-                    
-                    callCount++;
-                    if (callCount > MAX_CALLS_PER_SECOND) {
-                        console.warn('Event handler rate limit exceeded, skipping event');
-                        return;
-                    }
-                    
-                    return handler(...args);
-                } catch (error) {
-                    console.error('Error in optimized event handler:', error);
-                }
-            };
-        };
-
-        // ✅ OPTIMIZED: Batch message processing for better performance
-        let messageBatch = [];
-        let batchTimeout = null;
-        const BATCH_DELAY = 50; // Process messages in batches every 50ms
-
-        const processMessageBatch = () => {
-            if (messageBatch.length === 0) return;
-            
-            const batchToProcess = [...messageBatch];
-            messageBatch = [];
-            batchTimeout = null;
-            
-            for (const msg of batchToProcess) {
-                if (msg.type === 'gp2') {
-                    const notification = new GroupNotification(this, msg);
-                    if (['add', 'invite', 'linked_group_join'].includes(msg.subtype)) {
-                        /**
-                             * Emitted when a user joins the chat via invite link or is added by an admin.
-                             * @event Client#group_join
-                             * @param {GroupNotification} notification GroupNotification with more information about the action
-                             */
-                        this.emit(Events.GROUP_JOIN, notification);
-                    } else if (msg.subtype === 'remove' || msg.subtype === 'leave') {
-                        /**
-                             * Emitted when a user leaves the chat or is removed by an admin.
-                             * @event Client#group_leave
-                             * @param {GroupNotification} notification GroupNotification with more information about the action
-                             */
-                        this.emit(Events.GROUP_LEAVE, notification);
-                    } else if (msg.subtype === 'promote' || msg.subtype === 'demote') {
-                        /**
-                             * Emitted when a current user is promoted to an admin or demoted to a regular user.
-                             * @event Client#group_admin_changed
-                             * @param {GroupNotification} notification GroupNotification with more information about the action
-                             */
-                        this.emit(Events.GROUP_ADMIN_CHANGED, notification);
-                    } else if (msg.subtype === 'membership_approval_request') {
-                        /**
-                             * Emitted when some user requested to join the group
-                             * that has the membership approval mode turned on
-                             * @event Client#group_membership_request
-                             * @param {GroupNotification} notification GroupNotification with more information about the action
-                             * @param {string} notification.chatId The group ID the request was made for
-                             * @param {string} notification.author The user ID that made a request
-                             * @param {number} notification.timestamp The timestamp the request was made at
-                             */
-                        this.emit(Events.GROUP_MEMBERSHIP_REQUEST, notification);
-                    } else {
-                        /**
-                             * Emitted when group settings are updated, such as subject, description or picture.
-                             * @event Client#group_update
-                             * @param {GroupNotification} notification GroupNotification with more information about the action
-                             */
-                        this.emit(Events.GROUP_UPDATE, notification);
-                    }
-                } else {
-                    const message = new Message(this, msg);
-
-                    /**
-                         * Emitted when a new message is created, which may include the current user's own messages.
-                         * @event Client#message_create
-                         * @param {Message} message The message that was created
-                         */
-                    this.emit(Events.MESSAGE_CREATE, message);
-
-                    if (!msg.id.fromMe) {
-                        /**
-                             * Emitted when a new message is received.
-                             * @event Client#message
-                             * @param {Message} message The message that was received
-                             */
-                        this.emit(Events.MESSAGE_RECEIVED, message);
-                    }
-                }
-            }
-        };
-
-        // ✅ OPTIMIZED: Batch message handler
-        await exposeFunctionIfAbsent(this.pupPage, 'onAddMessageEvent', createOptimizedHandler(msg => {
-            // ✅ Add to batch instead of immediate processing
-            messageBatch.push(msg);
-            
-            if (!batchTimeout) {
-                batchTimeout = setTimeout(processMessageBatch, BATCH_DELAY);
-            }
-        }));
-        this._attachedListeners.push({ funcName: 'onAddMessageEvent' });
-
-        let last_message;
-
-        // ✅ OPTIMIZED: Single message handler for non-batch events
-        await exposeFunctionIfAbsent(this.pupPage, 'onChangeMessageTypeEvent', createOptimizedHandler((msg) => {
-            if (msg.type === 'revoked') {
-                const message = new Message(this, msg);
-                let revoked_msg;
-                if (last_message && msg.id.id === last_message.id.id) {
-                    revoked_msg = new Message(this, last_message);
-
-                    if (message.protocolMessageKey)
-                        revoked_msg.id = { ...message.protocolMessageKey };                    
-                }
-
-                /**
-                     * Emitted when a message is deleted for everyone in the chat.
-                     * @event Client#message_revoke_everyone
-                     * @param {Message} message The message that was revoked, in its current state. It will not contain the original message's data.
-                     * @param {?Message} revoked_msg The message that was revoked, before it was revoked. It will contain the message's original data. 
-                     * Note that due to the way this data is captured, it may be possible that this param will be undefined.
-                     */
-                this.emit(Events.MESSAGE_REVOKED_EVERYONE, message, revoked_msg);
-            }
-        }));
-        this._attachedListeners.push({ funcName: 'onChangeMessageTypeEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onChangeMessageEvent', createOptimizedHandler((msg) => {
-            if (msg.type !== 'revoked') {
-                last_message = msg;
-            }
-
-            /**
-                 * The event notification that is received when one of
-                 * the group participants changes their phone number.
-                 */
-            const isParticipant = msg.type === 'gp2' && msg.subtype === 'modify';
-
-            /**
-                 * The event notification that is received when one of
-                 * the contacts changes their phone number.
-                 */
-            const isContact = msg.type === 'notification_template' && msg.subtype === 'change_number';
-
-            if (isParticipant || isContact) {
-                /** @type {GroupNotification} object does not provide enough information about this event, so a @type {Message} object is used. */
-                const message = new Message(this, msg);
-
-                const newId = isParticipant ? msg.recipients[0] : msg.to;
-                const oldId = isParticipant ? msg.author : msg.templateParams.find(id => id !== newId);
-
-                /**
-                     * Emitted when a contact or a group participant changes their phone number.
-                     * @event Client#contact_changed
-                     * @param {Message} message Message with more information about the event.
-                     * @param {String} oldId The user's id (an old one) who changed their phone number
-                     * and who triggered the notification.
-                     * @param {String} newId The user's new id after the change.
-                     * @param {Boolean} isContact Indicates if a contact or a group participant changed their phone number.
-                     */
-                this.emit(Events.CONTACT_CHANGED, message, oldId, newId, isContact);
-            }
-        }));
-        this._attachedListeners.push({ funcName: 'onChangeMessageEvent' });
-
-        // Continue applying createOptimizedHandler to ALL other event listeners
-        await exposeFunctionIfAbsent(this.pupPage, 'onRemoveMessageEvent', createOptimizedHandler((msg) => {
-            if (!msg.isNewMsg) return;
-
-            const message = new Message(this, msg);
-
-            /**
-                 * Emitted when a message is deleted by the current user.
-                 * @event Client#message_revoke_me
-                 * @param {Message} message The message that was revoked
-                 */
-            this.emit(Events.MESSAGE_REVOKED_ME, message);
-        }));
-        this._attachedListeners.push({ funcName: 'onRemoveMessageEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onMessageAckEvent', createOptimizedHandler((msg, ack) => {
-            const message = new Message(this, msg);
-
-            /**
-                 * Emitted when an ack event occurrs on message type.
-                 * @event Client#message_ack
-                 * @param {Message} message The message that was affected
-                 * @param {MessageAck} ack The new ACK value
-                 */
-            this.emit(Events.MESSAGE_ACK, message, ack);
-        }));
-        this._attachedListeners.push({ funcName: 'onMessageAckEvent' });
-
-        // ✅ OPTIMIZED: Cache chat lookups for unread count events
-        await exposeFunctionIfAbsent(this.pupPage, 'onChatUnreadCountEvent', createOptimizedHandler(async (data) => {
-            const chat = await this.getChatById(data.id);
-                
-            /**
-                 * Emitted when the chat unread count changes
-                 */
-            this.emit(Events.UNREAD_COUNT, chat);
-        }));
-        this._attachedListeners.push({ funcName: 'onChatUnreadCountEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onMessageMediaUploadedEvent', createOptimizedHandler((msg) => {
-            const message = new Message(this, msg);
-
-            /**
-                 * Emitted when media has been uploaded for a message sent by the client.
-                 * @event Client#media_uploaded
-                 * @param {Message} message The message with media that was uploaded
-                 */
-            this.emit(Events.MEDIA_UPLOADED, message);
-        }));
-        this._attachedListeners.push({ funcName: 'onMessageMediaUploadedEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onAppStateChangedEvent', createOptimizedHandler(async (state) => {
-            /**
-                 * Emitted when the connection state changes
-                 * @event Client#change_state
-                 * @param {WAState} state the new connection state
-                 */
-            this.emit(Events.STATE_CHANGED, state);
-
-            const ACCEPTED_STATES = [WAState.CONNECTED, WAState.OPENING, WAState.PAIRING, WAState.TIMEOUT];
-
-            if (this.options.takeoverOnConflict) {
-                ACCEPTED_STATES.push(WAState.CONFLICT);
-
-                if (state === WAState.CONFLICT) {
-                    setTimeout(() => {
-                        this.pupPage.evaluate(() => window.Store.AppState.takeover());
-                    }, this.options.takeoverTimeoutMs);
-                }
-            }
-
-            if (!ACCEPTED_STATES.includes(state)) {
-                /**
-                     * Emitted when the client has been disconnected
-                     * @event Client#disconnected
-                     * @param {WAState|"LOGOUT"} reason reason that caused the disconnect
-                     */
-                await this.authStrategy.disconnect();
-                this.emit(Events.DISCONNECTED, state);
-                this.destroy();
-            }
-        }));
-        this._attachedListeners.push({ funcName: 'onAppStateChangedEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onBatteryStateChangedEvent', createOptimizedHandler((state) => {
-            const { battery, plugged } = state;
-
-            if (battery === undefined) return;
-
-            /**
-                 * Emitted when the battery percentage for the attached device changes. Will not be sent if using multi-device.
-                 * @event Client#change_battery
-                 * @param {object} batteryInfo
-                 * @param {number} batteryInfo.battery - The current battery percentage
-                 * @param {boolean} batteryInfo.plugged - Indicates if the phone is plugged in (true) or not (false)
-                 * @deprecated
-                 */
-            this.emit(Events.BATTERY_CHANGED, { battery, plugged });
-        }));
-        this._attachedListeners.push({ funcName: 'onBatteryStateChangedEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onIncomingCall', createOptimizedHandler((call) => {
-            /**
-                 * Emitted when a call is received
-                 * @event Client#incoming_call
-                 * @param {object} call
-                 * @param {number} call.id - Call id
-                 * @param {string} call.peerJid - Who called
-                 * @param {boolean} call.isVideo - if is video
-                 * @param {boolean} call.isGroup - if is group
-                 * @param {boolean} call.canHandleLocally - if we can handle in waweb
-                 * @param {boolean} call.outgoing - if is outgoing
-                 * @param {boolean} call.webClientShouldHandle - If Waweb should handle
-                 * @param {object} call.participants - Participants
-                 */
-            const cll = new Call(this, call);
-            this.emit(Events.INCOMING_CALL, cll);
-        }));
-        this._attachedListeners.push({ funcName: 'onIncomingCall' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onReaction', createOptimizedHandler((reactions) => {
-            for (const reaction of reactions) {
-                /**
-                     * Emitted when a reaction is sent, received, updated or removed
-                     * @event Client#message_reaction
-                     * @param {object} reaction
-                     * @param {object} reaction.id - Reaction id
-                     * @param {number} reaction.orphan - Orphan
-                     * @param {?string} reaction.orphanReason - Orphan reason
-                     * @param {number} reaction.timestamp - Timestamp
-                     * @param {string} reaction.reaction - Reaction
-                     * @param {boolean} reaction.read - Read
-                     * @param {object} reaction.msgId - Parent message id
-                     * @param {string} reaction.senderId - Sender id
-                     * @param {?number} reaction.ack - Ack
-                     */
-
-                this.emit(Events.MESSAGE_REACTION, new Reaction(this, reaction));
-            }
-        }));
-        this._attachedListeners.push({ funcName: 'onReaction' });
-
-        // ✅ OPTIMIZED: Cache chat lookups for removal events
-        await exposeFunctionIfAbsent(this.pupPage, 'onRemoveChatEvent', createOptimizedHandler(async (chat) => {
-            const _chat = await this.getChatById(chat.id);
-
-            /**
-                 * Emitted when a chat is removed
-                 * @event Client#chat_removed
-                 * @param {Chat} chat
-                 */
-            this.emit(Events.CHAT_REMOVED, _chat);
-        }));
-        this._attachedListeners.push({ funcName: 'onRemoveChatEvent' });
-            
-        await exposeFunctionIfAbsent(this.pupPage, 'onArchiveChatEvent', createOptimizedHandler(async (chat, currState, prevState) => {
-            const _chat = await this.getChatById(chat.id);
-                
-            /**
-                 * Emitted when a chat is archived/unarchived
-                 * @event Client#chat_archived
-                 * @param {Chat} chat
-                 * @param {boolean} currState
-                 * @param {boolean} prevState
-                 */
-            this.emit(Events.CHAT_ARCHIVED, _chat, currState, prevState);
-        }));
-        this._attachedListeners.push({ funcName: 'onArchiveChatEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onEditMessageEvent', createOptimizedHandler((msg, newBody, prevBody) => {
-            if(msg.type === 'revoked'){
-                return;
-            }
-            /**
-                 * Emitted when messages are edited
-                 * @event Client#message_edit
-                 * @param {Message} message
-                 * @param {string} newBody
-                 * @param {string} prevBody
-                 */
-            this.emit(Events.MESSAGE_EDIT, new Message(this, msg), newBody, prevBody);
-        }));
-        this._attachedListeners.push({ funcName: 'onEditMessageEvent' });
-            
-        await exposeFunctionIfAbsent(this.pupPage, 'onAddMessageCiphertextEvent', createOptimizedHandler(msg => {
-            /**
-                 * Emitted when messages are edited
-                 * @event Client#message_ciphertext
-                 * @param {Message} message
-                 */
-            this.emit(Events.MESSAGE_CIPHERTEXT, new Message(this, msg));
-        }));
-        this._attachedListeners.push({ funcName: 'onAddMessageCiphertextEvent' });
-
-        await exposeFunctionIfAbsent(this.pupPage, 'onPollVoteEvent', createOptimizedHandler((votes) => {
-            for (const vote of votes) {
-                /**
-                 * Emitted when some poll option is selected or deselected,
-                 * shows a user's current selected option(s) on the poll
-                 * @event Client#vote_update
-                 */
-                this.emit(Events.VOTE_UPDATE, new PollVote(this, vote));
-            }
-        }));
-        this._attachedListeners.push({ funcName: 'onPollVoteEvent' });
-
-        // ✅ OPTIMIZED: Store event binding with error handling
-        await this.pupPage.evaluate(() => {
-            try {
-                window.Store.Msg.on('change', (msg) => { window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg)); });
-                window.Store.Msg.on('change:type', (msg) => { window.onChangeMessageTypeEvent(window.WWebJS.getMessageModel(msg)); });
-                window.Store.Msg.on('change:ack', (msg, ack) => { window.onMessageAckEvent(window.WWebJS.getMessageModel(msg), ack); });
-                window.Store.Msg.on('change:isUnsentMedia', (msg, unsent) => { if (msg.id.fromMe && !unsent) window.onMessageMediaUploadedEvent(window.WWebJS.getMessageModel(msg)); });
-                window.Store.Msg.on('remove', (msg) => { if (msg.isNewMsg) window.onRemoveMessageEvent(window.WWebJS.getMessageModel(msg)); });
-                window.Store.Msg.on('change:body change:caption', (msg, newBody, prevBody) => { window.onEditMessageEvent(window.WWebJS.getMessageModel(msg), newBody, prevBody); });
-                window.Store.AppState.on('change:state', (_AppState, state) => { window.onAppStateChangedEvent(state); });
-                window.Store.Conn.on('change:battery', (state) => { window.onBatteryStateChangedEvent(state); });
-                window.Store.Call.on('add', (call) => { window.onIncomingCall(call); });
-                window.Store.Chat.on('remove', async (chat) => { window.onRemoveChatEvent(await window.WWebJS.getChatModel(chat)); });
-                window.Store.Chat.on('change:archive', async (chat, currState, prevState) => { window.onArchiveChatEvent(await window.WWebJS.getChatModel(chat), currState, prevState); });
-                window.Store.Msg.on('add', (msg) => { 
-                    if (msg.isNewMsg) {
-                        if(msg.type === 'ciphertext') {
-                            // defer message event until ciphertext is resolved (type changed)
-                            msg.once('change:type', (_msg) => window.onAddMessageEvent(window.WWebJS.getMessageModel(_msg)));
-                            window.onAddMessageCiphertextEvent(window.WWebJS.getMessageModel(msg));
-                        } else {
-                            window.onAddMessageEvent(window.WWebJS.getMessageModel(msg)); 
-                        }
-                    }
-                });
-                window.Store.Chat.on('change:unreadCount', (chat) => {window.onChatUnreadCountEvent(chat);});
-
-                if (window.compareWwebVersions(window.Debug.VERSION, '>=', '2.3000.1014111620')) {
-                    const module = window.Store.AddonReactionTable;
-                    const ogMethod = module.bulkUpsert;
-                    module.bulkUpsert = ((...args) => {
-                        window.onReaction(args[0].map(reaction => {
-                            const msgKey = reaction.id;
-                            const parentMsgKey = reaction.reactionParentKey;
-                            const timestamp = reaction.reactionTimestamp / 1000;
-                            const sender = reaction.author ?? reaction.from;
-                            const senderUserJid = sender._serialized;
-
-                            return {...reaction, msgKey, parentMsgKey, senderUserJid, timestamp };
-                        }));
-
-                        return ogMethod(...args);
-                    }).bind(module);
-
-                    const pollVoteModule = window.Store.AddonPollVoteTable;
-                    const ogPollVoteMethod = pollVoteModule.bulkUpsert;
-
-                    pollVoteModule.bulkUpsert = (async (...args) => {
-                        const votes = await Promise.all(args[0].map(async vote => {
-                            const msgKey = vote.id;
-                            const parentMsgKey = vote.pollUpdateParentKey;
-                            const timestamp = vote.t / 1000;
-                            const sender = vote.author ?? vote.from;
-                            const senderUserJid = sender._serialized;
-
-                            let parentMessage = window.Store.Msg.get(parentMsgKey._serialized);
-                            if (!parentMessage) {
-                                const fetched = await window.Store.Msg.getMessagesById([parentMsgKey._serialized]);
-                                parentMessage = fetched?.messages?.[0] || null;
-                            }
-
-                            return {
-                                ...vote,
-                                msgKey,
-                                sender,
-                                parentMsgKey,
-                                senderUserJid,
-                                timestamp,
-                                parentMessage
-                            };
-                        }));
-
-                        window.onPollVoteEvent(votes);
-
-                        return ogPollVoteMethod.apply(pollVoteModule, args);
-                    }).bind(pollVoteModule);
-                } else {
-                    const module = window.Store.createOrUpdateReactionsModule;
-                    const ogMethod = module.createOrUpdateReactions;
-                    module.createOrUpdateReactions = ((...args) => {
-                        window.onReaction(args[0].map(reaction => {
-                            const msgKey = window.Store.MsgKey.fromString(reaction.msgKey);
-                            const parentMsgKey = window.Store.MsgKey.fromString(reaction.parentMsgKey);
-                            const timestamp = reaction.timestamp / 1000;
-
-                            return {...reaction, msgKey, parentMsgKey, timestamp };
-                        }));
-
-                        return ogMethod(...args);
-                    }).bind(module);
-                }
-            } catch (error) {
-                console.error('Error setting up Store event listeners:', error);
-            }
-        });
-
-        // ✅ ADD: Clean up batch processing on destroy
-        this._cleanupCallbacks.push(() => {
-            if (batchTimeout) {
-                clearTimeout(batchTimeout);
-                batchTimeout = null;
-            }
-            if (messageBatch.length > 0) {
-                processMessageBatch(); // Process any remaining messages
-            }
-        });
-
-        // ✅ ADD: Mark listeners as successfully attached
-        this._listenersAttached = true;
-        console.log('Optimized event listeners attached successfully');
+async attachEventListeners() {
+    // ✅ ADD: Prevent duplicate event listener attachment
+    if (this._listenersAttached) {
+        console.log('Event listeners already attached, cleaning up first...');
+        await this._cleanupEventListeners();
     }
+    
+    // ✅ ADD: Initialize tracking for attached listeners
+    this._attachedListeners = [];
+
+    // ✅ FIXED: Improved rate limiting that won't trigger unnecessarily
+    const createOptimizedHandler = (handler, handlerName = 'unknown') => {
+        let callCount = 0;
+        let lastCallTime = 0;
+        const MAX_CALLS_PER_SECOND = 5000; // Much higher limit to avoid false positives
+        let lastWarningTime = 0;
+        
+        return (...args) => {
+            try {
+                const now = Date.now();
+                
+                // Reset counter if more than 1 second has passed
+                if (now - lastCallTime > 1000) {
+                    callCount = 0;
+                    lastCallTime = now;
+                }
+                
+                callCount++;
+                
+                // Only warn occasionally and with cooldown to prevent spam
+                if (callCount > MAX_CALLS_PER_SECOND) {
+                    // Warn only once every 10 seconds max for the same handler
+                    if (now - lastWarningTime > 10000) {
+                        console.warn(`Event handler rate limit exceeded for ${handlerName}. Count: ${callCount} events/sec`);
+                        lastWarningTime = now;
+                    }
+                    // Still process the event - don't skip it
+                }
+                
+                return handler(...args);
+            } catch (error) {
+                console.error(`Error in optimized event handler (${handlerName}):`, error);
+            }
+        };
+    };
+
+    // ✅ OPTIMIZED: Batch message processing for better performance
+    let messageBatch = [];
+    let batchTimeout = null;
+    const BATCH_DELAY = 50; // Process messages in batches every 50ms
+
+    const processMessageBatch = () => {
+        if (messageBatch.length === 0) return;
+        
+        const batchToProcess = [...messageBatch];
+        messageBatch = [];
+        batchTimeout = null;
+        
+        for (const msg of batchToProcess) {
+            if (msg.type === 'gp2') {
+                const notification = new GroupNotification(this, msg);
+                if (['add', 'invite', 'linked_group_join'].includes(msg.subtype)) {
+                    /**
+                         * Emitted when a user joins the chat via invite link or is added by an admin.
+                         * @event Client#group_join
+                         * @param {GroupNotification} notification GroupNotification with more information about the action
+                         */
+                    this.emit(Events.GROUP_JOIN, notification);
+                } else if (msg.subtype === 'remove' || msg.subtype === 'leave') {
+                    /**
+                         * Emitted when a user leaves the chat or is removed by an admin.
+                         * @event Client#group_leave
+                         * @param {GroupNotification} notification GroupNotification with more information about the action
+                         */
+                    this.emit(Events.GROUP_LEAVE, notification);
+                } else if (msg.subtype === 'promote' || msg.subtype === 'demote') {
+                    /**
+                         * Emitted when a current user is promoted to an admin or demoted to a regular user.
+                         * @event Client#group_admin_changed
+                         * @param {GroupNotification} notification GroupNotification with more information about the action
+                         */
+                    this.emit(Events.GROUP_ADMIN_CHANGED, notification);
+                } else if (msg.subtype === 'membership_approval_request') {
+                    /**
+                         * Emitted when some user requested to join the group
+                         * that has the membership approval mode turned on
+                         * @event Client#group_membership_request
+                         * @param {GroupNotification} notification GroupNotification with more information about the action
+                         * @param {string} notification.chatId The group ID the request was made for
+                         * @param {string} notification.author The user ID that made a request
+                         * @param {number} notification.timestamp The timestamp the request was made at
+                         */
+                    this.emit(Events.GROUP_MEMBERSHIP_REQUEST, notification);
+                } else {
+                    /**
+                         * Emitted when group settings are updated, such as subject, description or picture.
+                         * @event Client#group_update
+                         * @param {GroupNotification} notification GroupNotification with more information about the action
+                         */
+                    this.emit(Events.GROUP_UPDATE, notification);
+                }
+            } else {
+                const message = new Message(this, msg);
+
+                /**
+                     * Emitted when a new message is created, which may include the current user's own messages.
+                     * @event Client#message_create
+                     * @param {Message} message The message that was created
+                     */
+                this.emit(Events.MESSAGE_CREATE, message);
+
+                if (!msg.id.fromMe) {
+                    /**
+                         * Emitted when a new message is received.
+                         * @event Client#message
+                         * @param {Message} message The message that was received
+                         */
+                    this.emit(Events.MESSAGE_RECEIVED, message);
+                }
+            }
+        }
+    };
+
+    // ✅ OPTIMIZED: Batch message handler
+    await exposeFunctionIfAbsent(this.pupPage, 'onAddMessageEvent', createOptimizedHandler(msg => {
+        // ✅ Add to batch instead of immediate processing
+        messageBatch.push(msg);
+        
+        if (!batchTimeout) {
+            batchTimeout = setTimeout(processMessageBatch, BATCH_DELAY);
+        }
+    }, 'onAddMessageEvent'));
+    this._attachedListeners.push({ funcName: 'onAddMessageEvent' });
+
+    let last_message;
+
+    // ✅ OPTIMIZED: Single message handler for non-batch events
+    await exposeFunctionIfAbsent(this.pupPage, 'onChangeMessageTypeEvent', createOptimizedHandler((msg) => {
+        if (msg.type === 'revoked') {
+            const message = new Message(this, msg);
+            let revoked_msg;
+            if (last_message && msg.id.id === last_message.id.id) {
+                revoked_msg = new Message(this, last_message);
+
+                if (message.protocolMessageKey)
+                    revoked_msg.id = { ...message.protocolMessageKey };                    
+            }
+
+            /**
+                 * Emitted when a message is deleted for everyone in the chat.
+                 * @event Client#message_revoke_everyone
+                 * @param {Message} message The message that was revoked, in its current state. It will not contain the original message's data.
+                 * @param {?Message} revoked_msg The message that was revoked, before it was revoked. It will contain the message's original data. 
+                 * Note that due to the way this data is captured, it may be possible that this param will be undefined.
+                 */
+            this.emit(Events.MESSAGE_REVOKED_EVERYONE, message, revoked_msg);
+        }
+    }, 'onChangeMessageTypeEvent'));
+    this._attachedListeners.push({ funcName: 'onChangeMessageTypeEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onChangeMessageEvent', createOptimizedHandler((msg) => {
+        if (msg.type !== 'revoked') {
+            last_message = msg;
+        }
+
+        /**
+             * The event notification that is received when one of
+             * the group participants changes their phone number.
+             */
+        const isParticipant = msg.type === 'gp2' && msg.subtype === 'modify';
+
+        /**
+             * The event notification that is received when one of
+             * the contacts changes their phone number.
+             */
+        const isContact = msg.type === 'notification_template' && msg.subtype === 'change_number';
+
+        if (isParticipant || isContact) {
+            /** @type {GroupNotification} object does not provide enough information about this event, so a @type {Message} object is used. */
+            const message = new Message(this, msg);
+
+            const newId = isParticipant ? msg.recipients[0] : msg.to;
+            const oldId = isParticipant ? msg.author : msg.templateParams.find(id => id !== newId);
+
+            /**
+                 * Emitted when a contact or a group participant changes their phone number.
+                 * @event Client#contact_changed
+                 * @param {Message} message Message with more information about the event.
+                 * @param {String} oldId The user's id (an old one) who changed their phone number
+                 * and who triggered the notification.
+                 * @param {String} newId The user's new id after the change.
+                 * @param {Boolean} isContact Indicates if a contact or a group participant changed their phone number.
+                 */
+            this.emit(Events.CONTACT_CHANGED, message, oldId, newId, isContact);
+        }
+    }, 'onChangeMessageEvent'));
+    this._attachedListeners.push({ funcName: 'onChangeMessageEvent' });
+
+    // Continue applying createOptimizedHandler to ALL other event listeners
+    await exposeFunctionIfAbsent(this.pupPage, 'onRemoveMessageEvent', createOptimizedHandler((msg) => {
+        if (!msg.isNewMsg) return;
+
+        const message = new Message(this, msg);
+
+        /**
+             * Emitted when a message is deleted by the current user.
+             * @event Client#message_revoke_me
+             * @param {Message} message The message that was revoked
+             */
+        this.emit(Events.MESSAGE_REVOKED_ME, message);
+    }, 'onRemoveMessageEvent'));
+    this._attachedListeners.push({ funcName: 'onRemoveMessageEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onMessageAckEvent', createOptimizedHandler((msg, ack) => {
+        const message = new Message(this, msg);
+
+        /**
+             * Emitted when an ack event occurrs on message type.
+             * @event Client#message_ack
+             * @param {Message} message The message that was affected
+             * @param {MessageAck} ack The new ACK value
+             */
+        this.emit(Events.MESSAGE_ACK, message, ack);
+    }, 'onMessageAckEvent'));
+    this._attachedListeners.push({ funcName: 'onMessageAckEvent' });
+
+    // ✅ OPTIMIZED: Cache chat lookups for unread count events
+    await exposeFunctionIfAbsent(this.pupPage, 'onChatUnreadCountEvent', createOptimizedHandler(async (data) => {
+        const chat = await this.getChatById(data.id);
+            
+        /**
+             * Emitted when the chat unread count changes
+             */
+        this.emit(Events.UNREAD_COUNT, chat);
+    }, 'onChatUnreadCountEvent'));
+    this._attachedListeners.push({ funcName: 'onChatUnreadCountEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onMessageMediaUploadedEvent', createOptimizedHandler((msg) => {
+        const message = new Message(this, msg);
+
+        /**
+             * Emitted when media has been uploaded for a message sent by the client.
+             * @event Client#media_uploaded
+             * @param {Message} message The message with media that was uploaded
+             */
+        this.emit(Events.MEDIA_UPLOADED, message);
+    }, 'onMessageMediaUploadedEvent'));
+    this._attachedListeners.push({ funcName: 'onMessageMediaUploadedEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onAppStateChangedEvent', createOptimizedHandler(async (state) => {
+        /**
+             * Emitted when the connection state changes
+             * @event Client#change_state
+             * @param {WAState} state the new connection state
+             */
+        this.emit(Events.STATE_CHANGED, state);
+
+        const ACCEPTED_STATES = [WAState.CONNECTED, WAState.OPENING, WAState.PAIRING, WAState.TIMEOUT];
+
+        if (this.options.takeoverOnConflict) {
+            ACCEPTED_STATES.push(WAState.CONFLICT);
+
+            if (state === WAState.CONFLICT) {
+                setTimeout(() => {
+                    this.pupPage.evaluate(() => window.Store.AppState.takeover());
+                }, this.options.takeoverTimeoutMs);
+            }
+        }
+
+        if (!ACCEPTED_STATES.includes(state)) {
+            /**
+                 * Emitted when the client has been disconnected
+                 * @event Client#disconnected
+                 * @param {WAState|"LOGOUT"} reason reason that caused the disconnect
+                 */
+            await this.authStrategy.disconnect();
+            this.emit(Events.DISCONNECTED, state);
+            this.destroy();
+        }
+    }, 'onAppStateChangedEvent'));
+    this._attachedListeners.push({ funcName: 'onAppStateChangedEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onBatteryStateChangedEvent', createOptimizedHandler((state) => {
+        const { battery, plugged } = state;
+
+        if (battery === undefined) return;
+
+        /**
+             * Emitted when the battery percentage for the attached device changes. Will not be sent if using multi-device.
+             * @event Client#change_battery
+             * @param {object} batteryInfo
+             * @param {number} batteryInfo.battery - The current battery percentage
+             * @param {boolean} batteryInfo.plugged - Indicates if the phone is plugged in (true) or not (false)
+             * @deprecated
+             */
+        this.emit(Events.BATTERY_CHANGED, { battery, plugged });
+    }, 'onBatteryStateChangedEvent'));
+    this._attachedListeners.push({ funcName: 'onBatteryStateChangedEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onIncomingCall', createOptimizedHandler((call) => {
+        /**
+             * Emitted when a call is received
+             * @event Client#incoming_call
+             * @param {object} call
+             * @param {number} call.id - Call id
+             * @param {string} call.peerJid - Who called
+             * @param {boolean} call.isVideo - if is video
+             * @param {boolean} call.isGroup - if is group
+             * @param {boolean} call.canHandleLocally - if we can handle in waweb
+             * @param {boolean} call.outgoing - if is outgoing
+             * @param {boolean} call.webClientShouldHandle - If Waweb should handle
+             * @param {object} call.participants - Participants
+             */
+        const cll = new Call(this, call);
+        this.emit(Events.INCOMING_CALL, cll);
+    }, 'onIncomingCall'));
+    this._attachedListeners.push({ funcName: 'onIncomingCall' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onReaction', createOptimizedHandler((reactions) => {
+        for (const reaction of reactions) {
+            /**
+                 * Emitted when a reaction is sent, received, updated or removed
+                 * @event Client#message_reaction
+                 * @param {object} reaction
+                 * @param {object} reaction.id - Reaction id
+                 * @param {number} reaction.orphan - Orphan
+                 * @param {?string} reaction.orphanReason - Orphan reason
+                 * @param {number} reaction.timestamp - Timestamp
+                 * @param {string} reaction.reaction - Reaction
+                 * @param {boolean} reaction.read - Read
+                 * @param {object} reaction.msgId - Parent message id
+                 * @param {string} reaction.senderId - Sender id
+                 * @param {?number} reaction.ack - Ack
+                 */
+
+            this.emit(Events.MESSAGE_REACTION, new Reaction(this, reaction));
+        }
+    }, 'onReaction'));
+    this._attachedListeners.push({ funcName: 'onReaction' });
+
+    // ✅ OPTIMIZED: Cache chat lookups for removal events
+    await exposeFunctionIfAbsent(this.pupPage, 'onRemoveChatEvent', createOptimizedHandler(async (chat) => {
+        const _chat = await this.getChatById(chat.id);
+
+        /**
+             * Emitted when a chat is removed
+             * @event Client#chat_removed
+             * @param {Chat} chat
+             */
+        this.emit(Events.CHAT_REMOVED, _chat);
+    }, 'onRemoveChatEvent'));
+    this._attachedListeners.push({ funcName: 'onRemoveChatEvent' });
+        
+    await exposeFunctionIfAbsent(this.pupPage, 'onArchiveChatEvent', createOptimizedHandler(async (chat, currState, prevState) => {
+        const _chat = await this.getChatById(chat.id);
+            
+        /**
+             * Emitted when a chat is archived/unarchived
+             * @event Client#chat_archived
+             * @param {Chat} chat
+             * @param {boolean} currState
+             * @param {boolean} prevState
+             */
+        this.emit(Events.CHAT_ARCHIVED, _chat, currState, prevState);
+    }, 'onArchiveChatEvent'));
+    this._attachedListeners.push({ funcName: 'onArchiveChatEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onEditMessageEvent', createOptimizedHandler((msg, newBody, prevBody) => {
+        if(msg.type === 'revoked'){
+            return;
+        }
+        /**
+             * Emitted when messages are edited
+             * @event Client#message_edit
+             * @param {Message} message
+             * @param {string} newBody
+             * @param {string} prevBody
+             */
+        this.emit(Events.MESSAGE_EDIT, new Message(this, msg), newBody, prevBody);
+    }, 'onEditMessageEvent'));
+    this._attachedListeners.push({ funcName: 'onEditMessageEvent' });
+        
+    await exposeFunctionIfAbsent(this.pupPage, 'onAddMessageCiphertextEvent', createOptimizedHandler(msg => {
+        /**
+             * Emitted when messages are edited
+             * @event Client#message_ciphertext
+             * @param {Message} message
+             */
+        this.emit(Events.MESSAGE_CIPHERTEXT, new Message(this, msg));
+    }, 'onAddMessageCiphertextEvent'));
+    this._attachedListeners.push({ funcName: 'onAddMessageCiphertextEvent' });
+
+    await exposeFunctionIfAbsent(this.pupPage, 'onPollVoteEvent', createOptimizedHandler((votes) => {
+        for (const vote of votes) {
+            /**
+             * Emitted when some poll option is selected or deselected,
+             * shows a user's current selected option(s) on the poll
+             * @event Client#vote_update
+             */
+            this.emit(Events.VOTE_UPDATE, new PollVote(this, vote));
+        }
+    }, 'onPollVoteEvent'));
+    this._attachedListeners.push({ funcName: 'onPollVoteEvent' });
+
+    // ✅ OPTIMIZED: Store event binding with error handling
+    await this.pupPage.evaluate(() => {
+        try {
+            window.Store.Msg.on('change', (msg) => { window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg)); });
+            window.Store.Msg.on('change:type', (msg) => { window.onChangeMessageTypeEvent(window.WWebJS.getMessageModel(msg)); });
+            window.Store.Msg.on('change:ack', (msg, ack) => { window.onMessageAckEvent(window.WWebJS.getMessageModel(msg), ack); });
+            window.Store.Msg.on('change:isUnsentMedia', (msg, unsent) => { if (msg.id.fromMe && !unsent) window.onMessageMediaUploadedEvent(window.WWebJS.getMessageModel(msg)); });
+            window.Store.Msg.on('remove', (msg) => { if (msg.isNewMsg) window.onRemoveMessageEvent(window.WWebJS.getMessageModel(msg)); });
+            window.Store.Msg.on('change:body change:caption', (msg, newBody, prevBody) => { window.onEditMessageEvent(window.WWebJS.getMessageModel(msg), newBody, prevBody); });
+            window.Store.AppState.on('change:state', (_AppState, state) => { window.onAppStateChangedEvent(state); });
+            window.Store.Conn.on('change:battery', (state) => { window.onBatteryStateChangedEvent(state); });
+            window.Store.Call.on('add', (call) => { window.onIncomingCall(call); });
+            window.Store.Chat.on('remove', async (chat) => { window.onRemoveChatEvent(await window.WWebJS.getChatModel(chat)); });
+            window.Store.Chat.on('change:archive', async (chat, currState, prevState) => { window.onArchiveChatEvent(await window.WWebJS.getChatModel(chat), currState, prevState); });
+            window.Store.Msg.on('add', (msg) => { 
+                if (msg.isNewMsg) {
+                    if(msg.type === 'ciphertext') {
+                        // defer message event until ciphertext is resolved (type changed)
+                        msg.once('change:type', (_msg) => window.onAddMessageEvent(window.WWebJS.getMessageModel(_msg)));
+                        window.onAddMessageCiphertextEvent(window.WWebJS.getMessageModel(msg));
+                    } else {
+                        window.onAddMessageEvent(window.WWebJS.getMessageModel(msg)); 
+                    }
+                }
+            });
+            window.Store.Chat.on('change:unreadCount', (chat) => {window.onChatUnreadCountEvent(chat);});
+
+            if (window.compareWwebVersions(window.Debug.VERSION, '>=', '2.3000.1014111620')) {
+                const module = window.Store.AddonReactionTable;
+                const ogMethod = module.bulkUpsert;
+                module.bulkUpsert = ((...args) => {
+                    window.onReaction(args[0].map(reaction => {
+                        const msgKey = reaction.id;
+                        const parentMsgKey = reaction.reactionParentKey;
+                        const timestamp = reaction.reactionTimestamp / 1000;
+                        const sender = reaction.author ?? reaction.from;
+                        const senderUserJid = sender._serialized;
+
+                        return {...reaction, msgKey, parentMsgKey, senderUserJid, timestamp };
+                    }));
+
+                    return ogMethod(...args);
+                }).bind(module);
+
+                const pollVoteModule = window.Store.AddonPollVoteTable;
+                const ogPollVoteMethod = pollVoteModule.bulkUpsert;
+
+                pollVoteModule.bulkUpsert = (async (...args) => {
+                    const votes = await Promise.all(args[0].map(async vote => {
+                        const msgKey = vote.id;
+                        const parentMsgKey = vote.pollUpdateParentKey;
+                        const timestamp = vote.t / 1000;
+                        const sender = vote.author ?? vote.from;
+                        const senderUserJid = sender._serialized;
+
+                        let parentMessage = window.Store.Msg.get(parentMsgKey._serialized);
+                        if (!parentMessage) {
+                            const fetched = await window.Store.Msg.getMessagesById([parentMsgKey._serialized]);
+                            parentMessage = fetched?.messages?.[0] || null;
+                        }
+
+                        return {
+                            ...vote,
+                            msgKey,
+                            sender,
+                            parentMsgKey,
+                            senderUserJid,
+                            timestamp,
+                            parentMessage
+                        };
+                    }));
+
+                    window.onPollVoteEvent(votes);
+
+                    return ogPollVoteMethod.apply(pollVoteModule, args);
+                }).bind(pollVoteModule);
+            } else {
+                const module = window.Store.createOrUpdateReactionsModule;
+                const ogMethod = module.createOrUpdateReactions;
+                module.createOrUpdateReactions = ((...args) => {
+                    window.onReaction(args[0].map(reaction => {
+                        const msgKey = window.Store.MsgKey.fromString(reaction.msgKey);
+                        const parentMsgKey = window.Store.MsgKey.fromString(reaction.parentMsgKey);
+                        const timestamp = reaction.timestamp / 1000;
+
+                        return {...reaction, msgKey, parentMsgKey, timestamp };
+                    }));
+
+                    return ogMethod(...args);
+                }).bind(module);
+            }
+        } catch (error) {
+            console.error('Error setting up Store event listeners:', error);
+        }
+    });
+
+    // ✅ ADD: Clean up batch processing on destroy
+    this._cleanupCallbacks.push(() => {
+        if (batchTimeout) {
+            clearTimeout(batchTimeout);
+            batchTimeout = null;
+        }
+        if (messageBatch.length > 0) {
+            processMessageBatch(); // Process any remaining messages
+        }
+    });
+
+    // ✅ ADD: Mark listeners as successfully attached
+    this._listenersAttached = true;
+    console.log('Optimized event listeners attached successfully');
+}
     /**
      * Clean up event listeners to prevent duplication
      * @private
@@ -1219,167 +1316,234 @@ class Client extends EventEmitter {
      * @property {any} [extra] - Extra options
      */
     
-    /**
-     * Send a message to a specific chatId
-     * @param {string} chatId
-     * @param {string|MessageMedia|Location|Poll|Contact|Array<Contact>|Buttons|List} content
-     * @param {MessageSendOptions} [options] - Options used when sending the message
-     * 
-     * @returns {Promise<Message>} Message that was just sent
-     */
-    async sendMessage(chatId, content, options = {}) {
-                      // 🟡 KEEP: Your existing validation logic (unchanged)
-        const isChannel = /@\w*newsletter\b/.test(chatId);
-
-        if (isChannel && [
-            options.sendMediaAsDocument, options.quotedMessageId, 
-            options.parseVCards, options.isViewOnce,
-            content instanceof Location, content instanceof Contact,
-            content instanceof Buttons, content instanceof List,
-            Array.isArray(content) && content.length > 0 && content[0] instanceof Contact
-        ].includes(true)) {
-            console.warn('The message type is currently not supported for sending in channels,\nthe supported message types are: text, image, sticker, gif, video, voice and poll.');
-            return null;
-        }
-
-        if (options.mentions) {
-            !Array.isArray(options.mentions) && (options.mentions = [options.mentions]);
-            if (options.mentions.some((possiblyContact) => possiblyContact instanceof Contact)) {
-                console.warn('Mentions with an array of Contact are now deprecated. See more at https://github.com/pedroslopez/whatsapp-web.js/pull/2166.');
-                options.mentions = options.mentions.map((a) => a.id._serialized);
-            }
-        }
-
-        options.groupMentions && !Array.isArray(options.groupMentions) && (options.groupMentions = [options.groupMentions]);
-        
-        let internalOptions = {
-            linkPreview: options.linkPreview === false ? undefined : true,
-            sendAudioAsVoice: options.sendAudioAsVoice,
-            sendVideoAsGif: options.sendVideoAsGif,
-            sendMediaAsSticker: options.sendMediaAsSticker,
-            sendMediaAsDocument: options.sendMediaAsDocument,
-            sendMediaAsHd: options.sendMediaAsHd,
-            caption: options.caption,
-            quotedMessageId: options.quotedMessageId,
-            parseVCards: options.parseVCards !== false,
-            mentionedJidList: options.mentions || [],
-            groupMentions: options.groupMentions,
-            invokedBotWid: options.invokedBotWid,
-            ignoreQuoteErrors: options.ignoreQuoteErrors !== false,
-            waitUntilMsgSent: options.waitUntilMsgSent || false,
-            extraOptions: options.extra
-        };
-
-        const sendSeen = options.sendSeen !== false;
-
-        if (content instanceof MessageMedia) {
-            internalOptions.media = content;
-            internalOptions.isViewOnce = options.isViewOnce,
-            content = '';
-        } else if (options.media instanceof MessageMedia) {
-            internalOptions.media = options.media;
-            internalOptions.caption = content;
-            internalOptions.isViewOnce = options.isViewOnce,
-            content = '';
-        } else if (content instanceof Location) {
-            internalOptions.location = content;
-            content = '';
-        } else if (content instanceof Poll) {
-            internalOptions.poll = content;
-            content = '';
-        } else if (content instanceof ScheduledEvent) {
-            internalOptions.event = content;
-            content = '';
-        } else if (content instanceof Contact) {
-            internalOptions.contactCard = content.id._serialized;
-            content = '';
-        } else if (Array.isArray(content) && content.length > 0 && content[0] instanceof Contact) {
-            internalOptions.contactCardList = content.map(contact => contact.id._serialized);
-            content = '';
-        } else if (content instanceof Buttons) {
-            console.warn('Buttons are now deprecated. See more at https://www.youtube.com/watch?v=hv1R1rLeVVE.');
-            if (content.type !== 'chat') { internalOptions.attachment = content.body; }
-            internalOptions.buttons = content;
-            content = '';
-        } else if (content instanceof List) {
-            console.warn('Lists are now deprecated. See more at https://www.youtube.com/watch?v=hv1R1rLeVVE.');
-            internalOptions.list = content;
-            content = '';
-        }
-
-        if (internalOptions.sendMediaAsSticker && internalOptions.media) {
-            internalOptions.media = await Util.formatToWebpSticker(
-                internalOptions.media, {
-                    name: options.stickerName,
-                    author: options.stickerAuthor,
-                    categories: options.stickerCategories
-                }, this.pupPage
-            );
-        }
-
-        // ✅ SAFE FIX: Enhanced error handling WITHOUT retry loops
+/**
+ * Send a message to a specific chatId
+ * @param {string} chatId
+ * @param {string|MessageMedia|Location|Poll|Contact|Array<Contact>|Buttons|List} content
+ * @param {MessageSendOptions} [options] - Options used when sending the message
+ * 
+ * @returns {Promise<Message>} Message that was just sent
+ */
+/**
+ * Send a message to a specific chatId
+ * @param {string} chatId
+ * @param {string|MessageMedia|Location|Poll|Contact|Array<Contact>|Buttons|List} content
+ * @param {MessageSendOptions} [options] - Options used when sending the message
+ * 
+ * @returns {Promise<Message>} Message that was just sent
+ */
+async sendMessage(chatId, content, options = {}) {
+    // ✅ FIX: Better LID address handling
+    const originalChatId = chatId;
+    if (chatId.endsWith('@lid')) {
         try {
-            const sentMsg = await this.pupPage.evaluate(async (chatId, content, options, sendSeen) => {
-                try {
-                    const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
-                    
-                    if (!chat) {
-                        console.error('sendMessage: Chat not found for ID:', chatId);
-                        return null;
-                    }
-
-                    // ✅ ADD: Connection state check
-                    if (window.Store && window.Store.AppState) {
-                        const state = window.Store.AppState.state;
-                        if (state !== 'CONNECTED') {
-                            console.error('sendMessage: WhatsApp not connected. State:', state);
-                            return null;
-                        }
-                    }
-
-                    if (sendSeen) {
-                        await window.WWebJS.sendSeen(chatId).catch(err => {
-                            console.warn('sendMessage: sendSeen failed:', err.message);
-                            // Continue anyway - don't fail the entire message
-                        });
-                    }
-
-                    const msg = await window.WWebJS.sendMessage(chat, content, options);
-                    
-                    if (!msg) {
-                        console.error('sendMessage: WWebJS.sendMessage returned null/undefined');
-                        return null;
-                    }
-                    
-                    return window.WWebJS.getMessageModel(msg);
-                    
-                } catch (error) {
-                    console.error('sendMessage: Browser context error:', error);
-                    return null;
-                }
-            }, chatId, content, internalOptions, sendSeen);
-
-            if (sentMsg) {
-                return new Message(this, sentMsg);
-            } else {
-                console.error('sendMessage: Failed to send message to chat:', chatId);
-                return undefined;
+            console.log(`Converting LID address: ${chatId}`);
+            
+            // Try to get the contact first
+            let contact;
+            try {
+                contact = await this.getContactById(chatId);
+            } catch (error) {
+                console.log('Contact not found, trying alternative LID conversion...');
             }
             
+            if (contact && contact.id && !contact.id._serialized.endsWith('@lid')) {
+                chatId = contact.id._serialized;
+                console.log(`Converted LID to: ${chatId}`);
+            } else {
+                // If contact doesn't exist, try to extract phone number from LID
+                // LID format: 236274858340568:11@lid
+                const lidMatch = chatId.match(/^(\d+):\d+@lid$/);
+                if (lidMatch && lidMatch[1]) {
+                    const potentialPhoneNumber = lidMatch[1] + '@c.us';
+                    console.log(`Trying extracted phone number: ${potentialPhoneNumber}`);
+                    
+                    // Verify if this number exists
+                    try {
+                        const numberId = await this.getNumberId(potentialPhoneNumber.replace('@c.us', ''));
+                        if (numberId) {
+                            chatId = numberId._serialized;
+                            console.log(`Successfully converted LID to: ${chatId}`);
+                        } else {
+                            console.log('Extracted phone number not registered on WhatsApp');
+                            // Continue with original LID - WhatsApp might still handle it
+                        }
+                    } catch (error) {
+                        console.log('Could not verify extracted phone number');
+                        // Continue with original LID
+                    }
+                } else {
+                    console.log('LID format not recognized, using original');
+                }
+            }
         } catch (error) {
-            // ✅ SAFE: Log error but don't retry (prevents bans)
-            console.error('sendMessage: Critical error:', error);
-            
-            // ✅ EMIT ERROR EVENT for user handling
-            this.emit(Events.MESSAGE_SEND_FAILURE, {
-                chatId,
-                error: error.message,
-                timestamp: Date.now()
-            });
-            
-            return undefined;
+            console.error('Error converting LID address:', error.message);
+            // Continue with original chatId - sometimes WhatsApp can handle LID directly
         }
     }
+
+    const isChannel = /@\w*newsletter\b/.test(chatId);
+
+    if (isChannel && [
+        options.sendMediaAsDocument, options.quotedMessageId, 
+        options.parseVCards, options.isViewOnce,
+        content instanceof Location, content instanceof Contact,
+        content instanceof Buttons, content instanceof List,
+        Array.isArray(content) && content.length > 0 && content[0] instanceof Contact
+    ].includes(true)) {
+        console.warn('The message type is currently not supported for sending in channels,\nthe supported message types are: text, image, sticker, gif, video, voice and poll.');
+        return null;
+    }
+
+    if (options.mentions) {
+        !Array.isArray(options.mentions) && (options.mentions = [options.mentions]);
+        if (options.mentions.some((possiblyContact) => possiblyContact instanceof Contact)) {
+            console.warn('Mentions with an array of Contact are now deprecated. See more at https://github.com/pedroslopez/whatsapp-web.js/pull/2166.');
+            options.mentions = options.mentions.map((a) => a.id._serialized);
+        }
+    }
+
+    options.groupMentions && !Array.isArray(options.groupMentions) && (options.groupMentions = [options.groupMentions]);
+    
+    let internalOptions = {
+        linkPreview: options.linkPreview === false ? undefined : true,
+        sendAudioAsVoice: options.sendAudioAsVoice,
+        sendVideoAsGif: options.sendVideoAsGif,
+        sendMediaAsSticker: options.sendMediaAsSticker,
+        sendMediaAsDocument: options.sendMediaAsDocument,
+        sendMediaAsHd: options.sendMediaAsHd,
+        caption: options.caption,
+        quotedMessageId: options.quotedMessageId,
+        parseVCards: options.parseVCards !== false,
+        mentionedJidList: options.mentions || [],
+        groupMentions: options.groupMentions,
+        invokedBotWid: options.invokedBotWid,
+        ignoreQuoteErrors: options.ignoreQuoteErrors !== false,
+        waitUntilMsgSent: options.waitUntilMsgSent || false,
+        extraOptions: options.extra
+    };
+
+    const sendSeen = options.sendSeen !== false;
+
+    if (content instanceof MessageMedia) {
+        internalOptions.media = content;
+        internalOptions.isViewOnce = options.isViewOnce,
+        content = '';
+    } else if (options.media instanceof MessageMedia) {
+        internalOptions.media = options.media;
+        internalOptions.caption = content;
+        internalOptions.isViewOnce = options.isViewOnce,
+        content = '';
+    } else if (content instanceof Location) {
+        internalOptions.location = content;
+        content = '';
+    } else if (content instanceof Poll) {
+        internalOptions.poll = content;
+        content = '';
+    } else if (content instanceof ScheduledEvent) {
+        internalOptions.event = content;
+        content = '';
+    } else if (content instanceof Contact) {
+        internalOptions.contactCard = content.id._serialized;
+        content = '';
+    } else if (Array.isArray(content) && content.length > 0 && content[0] instanceof Contact) {
+        internalOptions.contactCardList = content.map(contact => contact.id._serialized);
+        content = '';
+    } else if (content instanceof Buttons) {
+        console.warn('Buttons are now deprecated. See more at https://www.youtube.com/watch?v=hv1R1rLeVVE.');
+        if (content.type !== 'chat') { internalOptions.attachment = content.body; }
+        internalOptions.buttons = content;
+        content = '';
+    } else if (content instanceof List) {
+        console.warn('Lists are now deprecated. See more at https://www.youtube.com/watch?v=hv1R1rLeVVE.');
+        internalOptions.list = content;
+        content = '';
+    }
+
+    if (internalOptions.sendMediaAsSticker && internalOptions.media) {
+        internalOptions.media = await Util.formatToWebpSticker(
+            internalOptions.media, {
+                name: options.stickerName,
+                author: options.stickerAuthor,
+                categories: options.stickerCategories
+            }, this.pupPage
+        );
+    }
+
+    // ✅ SAFE FIX: Enhanced error handling WITHOUT retry loops
+    try {
+        const sentMsg = await this.pupPage.evaluate(async (chatId, content, options, sendSeen, originalChatId) => {
+            try {
+                let chat;
+                
+                // First try with the converted chatId
+                try {
+                    chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+                } catch (error) {
+                    console.log(`Chat not found with converted ID ${chatId}, trying original: ${originalChatId}`);
+                    // If converted ID fails, try the original LID
+                    if (originalChatId !== chatId) {
+                        chat = await window.WWebJS.getChat(originalChatId, { getAsModel: false });
+                    }
+                }
+                
+                if (!chat) {
+                    console.error('sendMessage: Chat not found for ID:', chatId, 'or original:', originalChatId);
+                    return null;
+                }
+
+                // ✅ ADD: Connection state check
+                if (window.Store && window.Store.AppState) {
+                    const state = window.Store.AppState.state;
+                    if (state !== 'CONNECTED') {
+                        console.error('sendMessage: WhatsApp not connected. State:', state);
+                        return null;
+                    }
+                }
+
+                if (sendSeen) {
+                    await window.WWebJS.sendSeen(chat.id._serialized).catch(err => {
+                        console.warn('sendMessage: sendSeen failed:', err.message);
+                        // Continue anyway - don't fail the entire message
+                    });
+                }
+
+                const msg = await window.WWebJS.sendMessage(chat, content, options);
+                
+                if (!msg) {
+                    console.error('sendMessage: WWebJS.sendMessage returned null/undefined');
+                    return null;
+                }
+                
+                return window.WWebJS.getMessageModel(msg);
+                
+            } catch (error) {
+                console.error('sendMessage: Browser context error:', error);
+                return null;
+            }
+        }, chatId, content, internalOptions, sendSeen, originalChatId);
+
+        if (sentMsg) {
+            return new Message(this, sentMsg);
+        } else {
+            console.error('sendMessage: Failed to send message to chat. Original:', originalChatId, 'Converted:', chatId);
+            return undefined;
+        }
+        
+    } catch (error) {
+        // ✅ SAFE: Log error but don't retry (prevents bans)
+        console.error('sendMessage: Critical error:', error);
+        
+        // ✅ EMIT ERROR EVENT for user handling
+        this.emit(Events.MESSAGE_SEND_FAILURE, {
+            chatId: originalChatId,
+            error: error.message,
+            timestamp: Date.now()
+        });
+        
+        return undefined;
+    }
+}
 
     /**
      * @typedef {Object} SendChannelAdminInviteOptions
@@ -1560,13 +1724,24 @@ class Client extends EventEmitter {
      * @param {string} contactId
      * @returns {Promise<Contact>}
      */
-    async getContactById(contactId) {
-        let contact = await this.pupPage.evaluate(contactId => {
-            return window.WWebJS.getContact(contactId);
-        }, contactId);
+async getContactById(contactId) {
+    // ✅ FIX: Remove :11 suffix from LID addresses before processing
+    let processedContactId = contactId;
+    if (contactId.endsWith('@lid')) {
+        const lidMatch = contactId.match(/^(\d+):\d+@lid$/);
+        if (lidMatch && lidMatch[1]) {
+            processedContactId = lidMatch[1] + '@lid';
+            //console.log(`Cleaned LID format: ${contactId} → ${processedContactId}`);
 
-        return ContactFactory.create(this, contact);
+        }
     }
+
+    let contact = await this.pupPage.evaluate(contactId => {
+        return window.WWebJS.getContact(contactId);
+    }, processedContactId);
+
+    return ContactFactory.create(this, contact);
+}
     
     async getMessageById(messageId) {
         try {
