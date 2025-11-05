@@ -117,7 +117,23 @@ client.on('message', async msg => {
         } else {
             msg.reply('This command can only be used in a group!');
         }
-    } else if (msg.body.startsWith('!join ')) {
+    } else if (msg.body.startsWith('!joinrequests')) {
+        const chat = await msg.getChat();
+        if (!chat.isGroup) return msg.reply('This command can only be used in a group!');
+
+        const arg = msg.body.split(' ')[1]?.toLowerCase();
+        if (!arg || !['on', 'off'].includes(arg)) {
+            return msg.reply('Usage: !joinrequests <on|off>');
+        }
+
+        const enabled = arg === 'on';
+        const result = await chat.setJoinRequestsEnabled(enabled);
+
+        msg.reply(result
+            ? `✅ Join request approval has been ${enabled ? 'enabled' : 'disabled'} for this group.`
+            : '❌ Failed to update join request setting.'
+        );
+    }else if (msg.body.startsWith('!join ')) {
         const inviteCode = msg.body.split(' ')[1];
         try {
             await client.acceptInvite(inviteCode);
