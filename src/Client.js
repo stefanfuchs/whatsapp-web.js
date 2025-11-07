@@ -114,54 +114,89 @@ class Client extends EventEmitter {
      */
     async inject() {
         try {
-            // ✅ ADD: Enhanced version detection with better error handling
-            await this.pupPage.waitForFunction('window.Debug?.VERSION != undefined', {
-                timeout: this.options.authTimeoutMs
-            }).catch(error => {
-                console.error('WhatsApp Web version detection failed:', error);
-                throw new Error('WhatsApp Web version not detected - page may not have loaded properly');
-            });
+            // ✅ ENHANCED: Version detection with retry logic
+            let versionDetected = false;
+            let versionAttempts = 0;
+            
+            while (!versionDetected && versionAttempts < 3) {
+                try {
+                    await this.pupPage.waitForFunction('window.Debug?.VERSION != undefined', {
+                        timeout: this.options.authTimeoutMs
+                    });
+                    versionDetected = true;
+                } catch (error) {
+                    versionAttempts++;
+                    console.warn(`Version detection attempt ${versionAttempts} failed:`, error.message);
+                    if (versionAttempts >= 3) {
+                        throw new Error('WhatsApp Web version not detected after 3 attempts - page may not have loaded properly');
+                    }
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
 
             await this.setDeviceName(this.options.deviceName, this.options.browserName);
             const pairWithPhoneNumber = this.options.pairWithPhoneNumber;
             const version = await this.getWWebVersion();
             const isCometOrAbove = parseInt(version.split('.')?.[1]) >= 3000;
 
-            if (isCometOrAbove) {
-                await this.pupPage.evaluate(ExposeAuthStore);
-            } else {
-                await this.pupPage.evaluate(ExposeLegacyAuthStore, moduleRaid.toString());
+            // ✅ FIX: Enhanced auth store injection with validation
+            let authStoreInjected = false;
+            try {
+                if (isCometOrAbove) {
+                    await this.pupPage.evaluate(ExposeAuthStore);
+                } else {
+                    await this.pupPage.evaluate(ExposeLegacyAuthStore, moduleRaid.toString());
+                }
+                
+                // Validate auth store injection
+                authStoreInjected = await this.pupPage.evaluate(() => {
+                    return !!(window.AuthStore && window.AuthStore.AppState);
+                });
+                
+                if (!authStoreInjected) {
+                    throw new Error('AuthStore injection failed - critical objects missing');
+                }
+            } catch (error) {
+                throw new Error(`AuthStore injection failed: ${error.message}`);
             }
 
-            // ✅ ENHANCED: Better authentication state validation with timeout protection
+            // ✅ FIX: Enhanced authentication state validation with proper cleanup
             const needAuthentication = await this.pupPage.evaluate(async () => {
                 if (!window.AuthStore || !window.AuthStore.AppState) {
                     console.error('AuthStore not available during injection');
-                    return true; // Assume authentication needed if AuthStore missing
+                    return true;
                 }
 
                 let state = window.AuthStore.AppState.state;
                 console.log('Initial auth state:', state);
 
                 if (state === 'OPENING' || state === 'UNLAUNCHED' || state === 'PAIRING') {
-                    // ✅ SAFE: Wait for state change with timeout protection
-                    return new Promise((resolve) => {
+                    return new Promise((resolve, reject) => {
                         const timeout = setTimeout(() => {
+                            // ✅ FIX: Clean up event listener on timeout
                             window.AuthStore.AppState.off('change:state', stateChangeHandler);
                             console.warn('Auth state change timeout, current state:', state);
                             resolve(state === 'UNPAIRED' || state === 'UNPAIRED_IDLE');
-                        }, 10000); // 10 second timeout
+                        }, 10000);
+
+                        // ✅ FIX: Add cleanup on promise rejection
+                        const cleanup = () => {
+                            clearTimeout(timeout);
+                            window.AuthStore.AppState.off('change:state', stateChangeHandler);
+                        };
 
                         const stateChangeHandler = (_AppState, newState) => {
                             console.log('Auth state changed:', newState);
                             if (newState !== 'OPENING' && newState !== 'UNLAUNCHED' && newState !== 'PAIRING') {
-                                clearTimeout(timeout);
-                                window.AuthStore.AppState.off('change:state', stateChangeHandler);
+                                cleanup();
                                 resolve(newState === 'UNPAIRED' || newState === 'UNPAIRED_IDLE');
                             }
                         };
 
                         window.AuthStore.AppState.on('change:state', stateChangeHandler);
+                        
+                        // ✅ FIX: Handle page navigation/disconnection
+                        window.addEventListener('beforeunload', cleanup);
                     });
                 }
                 
@@ -172,16 +207,10 @@ class Client extends EventEmitter {
                 const { failed, failureEventPayload, restart } = await this.authStrategy.onAuthenticationNeeded();
 
                 if (failed) {
-                    /**
-                     * Emitted when there has been an error while trying to restore an existing session
-                     * @event Client#auth_failure
-                     * @param {string} message
-                     */
                     console.error('Authentication strategy failed:', failureEventPayload);
                     this.emit(Events.AUTHENTICATION_FAILURE, failureEventPayload);
                     await this.destroy();
                     if (restart) {
-                        // session restore failed so try again but without session to force new authentication
                         return this.initialize();
                     }
                     return;
@@ -190,12 +219,6 @@ class Client extends EventEmitter {
                 // Register qr/code events
                 if (pairWithPhoneNumber.phoneNumber) {
                     await exposeFunctionIfAbsent(this.pupPage, 'onCodeReceivedEvent', async (code) => {
-                        /**
-                        * Emitted when a pairing code is received
-                        * @event Client#code
-                        * @param {string} code Code
-                        * @returns {string} Code that was just received
-                        */
                         console.log('Pairing code received:', code);
                         this.emit(Events.CODE_RECEIVED, code);
                         return code;
@@ -204,11 +227,6 @@ class Client extends EventEmitter {
                 } else {
                     let qrRetries = 0;
                     await exposeFunctionIfAbsent(this.pupPage, 'onQRChangedEvent', async (qr) => {
-                        /**
-                        * Emitted when a QR code is received
-                        * @event Client#qr
-                        * @param {string} qr QR Code
-                        */
                         console.log('QR code updated');
                         this.emit(Events.QR_RECEIVED, qr);
                         if (this.options.qrMaxRetries > 0) {
@@ -221,7 +239,8 @@ class Client extends EventEmitter {
                         }
                     });
 
-                    await this.pupPage.evaluate(async () => {
+                    // ✅ FIX: Enhanced QR generation with proper error handling
+                    const qrGenerated = await this.pupPage.evaluate(async () => {
                         try {
                             const registrationInfo = await window.AuthStore.RegistrationUtils.waSignalStore.getRegistrationInfo();
                             const noiseKeyPair = await window.AuthStore.RegistrationUtils.waNoiseInfo.get();
@@ -231,115 +250,67 @@ class Client extends EventEmitter {
                             const platform = window.AuthStore.RegistrationUtils.DEVICE_PLATFORM;
                             const getQR = (ref) => ref + ',' + staticKeyB64 + ',' + identityKeyB64 + ',' + advSecretKey + ',' + platform;
 
-                            window.onQRChangedEvent(getQR(window.AuthStore.Conn.ref)); // initial qr
-                            window.AuthStore.Conn.on('change:ref', (_, ref) => { window.onQRChangedEvent(getQR(ref)); }); // future QR changes
+                            window.onQRChangedEvent(getQR(window.AuthStore.Conn.ref));
+                            window.AuthStore.Conn.on('change:ref', (_, ref) => { 
+                                window.onQRChangedEvent(getQR(ref)); 
+                            });
+                            return true;
                         } catch (error) {
                             console.error('Error generating QR code:', error);
+                            return false;
                         }
                     });
+
+                    if (!qrGenerated) {
+                        throw new Error('QR code generation failed');
+                    }
                 }
             }
 
-            await exposeFunctionIfAbsent(this.pupPage, 'onAuthAppStateChangedEvent', async (state) => {
-                console.log('Auth app state changed:', state);
-                if (state == 'UNPAIRED_IDLE' && !pairWithPhoneNumber.phoneNumber) {
-                    // refresh qr code
-                    window.Store.Cmd.refreshQR();
-                }
-            });
-
-            await exposeFunctionIfAbsent(this.pupPage, 'onAppStateHasSyncedEvent', async () => {
-                console.log('App state has synced - proceeding with injection');
-                const authEventPayload = await this.authStrategy.getAuthEventPayload();
-                /**
-                     * Emitted when authentication is successful
-                     * @event Client#authenticated
-                     */
-                this.emit(Events.AUTHENTICATED, authEventPayload);
-
-                const injected = await this.pupPage.evaluate(async () => {
-                    return typeof window.Store !== 'undefined' && typeof window.WWebJS !== 'undefined';
-                });
-
-                if (!injected) {
-                    console.log('Performing initial injection...');
-                    
-                    if (this.options.webVersionCache.type === 'local' && this.currentIndexHtml) {
-                        const { type: webCacheType, ...webCacheOptions } = this.options.webVersionCache;
-                        const webCache = WebCacheFactory.createWebCache(webCacheType, webCacheOptions);
-                
-                        await webCache.persist(this.currentIndexHtml, version);
-                    }
-
-                    if (isCometOrAbove) {
-                        await this.pupPage.evaluate(ExposeStore);
-                    } else {
-                        // make sure all modules are ready before injection
-                        // 2 second delay after authentication makes sense and does not need to be made dyanmic or removed
-                        console.log('Waiting for modules to initialize...');
-                        await new Promise(r => setTimeout(r, 2000)); 
-                        await this.pupPage.evaluate(ExposeLegacyStore);
-                    }
-
-                    // Check window.Store Injection with better error handling
-                    try {
-                        await this.pupPage.waitForFunction('window.Store != undefined', { timeout: 10000 });
-                        console.log('Store injection successful');
-                    } catch (error) {
-                        console.error('Store injection failed - Store object not available');
-                        throw new Error('WhatsApp Web Store injection failed');
-                    }
-                
-                    /**
-                         * Current connection information
-                         * @type {ClientInfo}
-                         */
-                    this.info = new ClientInfo(this, await this.pupPage.evaluate(() => {
-                        if (!window.Store.Conn || !window.Store.User) {
-                            throw new Error('Store objects not properly initialized');
+            // ✅ FIX: Enhanced event exposure with validation
+            const exposedFunctions = [
+                { name: 'onAuthAppStateChangedEvent', handler: async (state) => {
+                    console.log('Auth app state changed:', state);
+                    if (state == 'UNPAIRED_IDLE' && !pairWithPhoneNumber.phoneNumber) {
+                        try {
+                            await this.pupPage.evaluate(() => {
+                                window.Store?.Cmd?.refreshQR();
+                            });
+                        } catch (error) {
+                            console.warn('Failed to refresh QR:', error);
                         }
-                        return { ...window.Store.Conn.serialize(), wid: window.Store.User.getMaybeMePnUser() || window.Store.User.getMaybeMeLidUser() };
-                    }));
+                    }
+                }},
+                { name: 'onAppStateHasSyncedEvent', handler: async () => {
+                    await this._handleAppStateSynced(isCometOrAbove, version, pairWithPhoneNumber);
+                }},
+                { name: 'onOfflineProgressUpdateEvent', handler: async (percent) => {
+                    let lastPercent = null;
+                    if (lastPercent !== percent) {
+                        lastPercent = percent;
+                        this.emit(Events.LOADING_SCREEN, percent, 'WhatsApp');
+                    }
+                }},
+                { name: 'onLogoutEvent', handler: async () => {
+                    console.log('Logout event detected');
+                    this.lastLoggedOut = true;
+                    await this.pupPage.waitForNavigation({waitUntil: 'load', timeout: 5000}).catch((_) => {
+                        console.log('Navigation after logout completed or timed out');
+                    });
+                }}
+            ];
 
-                    this.interface = new InterfaceController(this);
+            for (const { name, handler } of exposedFunctions) {
+                await exposeFunctionIfAbsent(this.pupPage, name, handler);
+            }
 
-                    //Load util functions (serializers, helper functions)
-                    await this.pupPage.evaluate(LoadUtils);
-
-                    await this.attachEventListeners();
-                    console.log('Event listeners attached successfully');
-                } else {
-                    console.log('Already injected, reattaching event listeners...');
-                    await this.attachEventListeners();
-                }
-                
-                /**
-                     * Emitted when the client has initialized and is ready to receive messages.
-                     * @event Client#ready
-                     */
-                console.log('Client is ready');
-                this.emit(Events.READY);
-                this.authStrategy.afterAuthReady();
-            });
-
-            let lastPercent = null;
-            await exposeFunctionIfAbsent(this.pupPage, 'onOfflineProgressUpdateEvent', async (percent) => {
-                if (lastPercent !== percent) {
-                    lastPercent = percent;
-                    this.emit(Events.LOADING_SCREEN, percent, 'WhatsApp'); // Message is hardcoded as "WhatsApp" for now
-                }
-            });
-
-            await exposeFunctionIfAbsent(this.pupPage, 'onLogoutEvent', async () => {
-                console.log('Logout event detected');
-                this.lastLoggedOut = true;
-                await this.pupPage.waitForNavigation({waitUntil: 'load', timeout: 5000}).catch((_) => {
-                    console.log('Navigation after logout completed or timed out');
-                });
-            });
-
-            await this.pupPage.evaluate(() => {
+            // ✅ FIX: Enhanced event binding with validation
+            const eventsBound = await this.pupPage.evaluate(() => {
                 try {
+                    if (!window.AuthStore || !window.AuthStore.AppState) {
+                        return false;
+                    }
+
                     window.AuthStore.AppState.on('change:state', (_AppState, state) => { 
                         window.onAuthAppStateChangedEvent(state); 
                     });
@@ -352,24 +323,125 @@ class Client extends EventEmitter {
                     window.AuthStore.Cmd.on('logout', async () => {
                         await window.onLogoutEvent();
                     });
+                    
+                    return true;
                 } catch (error) {
                     console.error('Error setting up auth event listeners:', error);
+                    return false;
                 }
             });
+
+            if (!eventsBound) {
+                throw new Error('Failed to bind critical auth event listeners');
+            }
 
             console.log('Injection completed successfully');
 
         } catch (error) {
-            // ✅ ADD: Comprehensive error handling for the entire injection process
             console.error('Critical error during injection:', error);
             this.emit(Events.AUTHENTICATION_FAILURE, `Injection failed: ${error.message}`);
-            throw error; // Re-throw to allow proper error handling upstream
+            
+            // ✅ FIX: Safe cleanup on injection failure
+            await this._safeCleanup();
+            throw error;
         }
     }
 
-    /**
-     * Sets up events and requirements, kicks off authentication request
-     */
+    // ✅ ADD: Extract complex logic to separate method
+    async _handleAppStateSynced(isCometOrAbove, version, pairWithPhoneNumber) {
+        console.log('App state has synced - proceeding with injection');
+        const authEventPayload = await this.authStrategy.getAuthEventPayload();
+        this.emit(Events.AUTHENTICATED, authEventPayload);
+
+        const injected = await this.pupPage.evaluate(async () => {
+            return typeof window.Store !== 'undefined' && typeof window.WWebJS !== 'undefined';
+        });
+
+        if (!injected) {
+            console.log('Performing initial injection...');
+            
+            if (this.options.webVersionCache.type === 'local' && this.currentIndexHtml) {
+                const { type: webCacheType, ...webCacheOptions } = this.options.webVersionCache;
+                const webCache = WebCacheFactory.createWebCache(webCacheType, webCacheOptions);
+                await webCache.persist(this.currentIndexHtml, version);
+            }
+
+            // ✅ FIX: Enhanced Store injection with retry logic
+            await this._injectStoreWithRetry(isCometOrAbove);
+            
+            this.info = new ClientInfo(this, await this.pupPage.evaluate(() => {
+                if (!window.Store.Conn || !window.Store.User) {
+                    throw new Error('Store objects not properly initialized');
+                }
+                return { ...window.Store.Conn.serialize(), wid: window.Store.User.getMaybeMePnUser() || window.Store.User.getMaybeMeLidUser() };
+            }));
+
+            this.interface = new InterfaceController(this);
+            await this.pupPage.evaluate(LoadUtils);
+            await this.attachEventListeners();
+            console.log('Event listeners attached successfully');
+        } else {
+            console.log('Already injected, reattaching event listeners...');
+            await this.attachEventListeners();
+        }
+        
+        console.log('Client is ready');
+        this.emit(Events.READY);
+        this.authStrategy.afterAuthReady();
+    }
+
+    // ✅ ADD: Store injection with retry logic
+    async _injectStoreWithRetry(isCometOrAbove) {
+        let storeInjected = false;
+        let attempts = 0;
+        const maxAttempts = 3;
+
+        while (!storeInjected && attempts < maxAttempts) {
+            try {
+                attempts++;
+                console.log(`Store injection attempt ${attempts}...`);
+
+                if (isCometOrAbove) {
+                    await this.pupPage.evaluate(ExposeStore);
+                } else {
+                    console.log('Waiting for modules to initialize...');
+                    await new Promise(r => setTimeout(r, 2000)); 
+                    await this.pupPage.evaluate(ExposeLegacyStore);
+                }
+
+                await this.pupPage.waitForFunction('window.Store != undefined', { 
+                    timeout: 15000,
+                    polling: 1000 
+                });
+
+                // Validate critical Store components
+                const storeValid = await this.pupPage.evaluate(() => {
+                    return !!(window.Store && 
+                            window.Store.Conn && 
+                            window.Store.User && 
+                            window.Store.Msg);
+                });
+
+                if (storeValid) {
+                    storeInjected = true;
+                    console.log('Store injection successful and validated');
+                } else {
+                    throw new Error('Store components not properly initialized');
+                }
+
+            } catch (error) {
+                console.error(`Store injection attempt ${attempts} failed:`, error.message);
+                
+                if (attempts >= maxAttempts) {
+                    throw new Error(`Store injection failed after ${maxAttempts} attempts: ${error.message}`);
+                }
+                
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        }
+    }
+
+
 /**
  * Sets up events and requirements, kicks off authentication request
  */
@@ -1101,23 +1173,76 @@ async attachEventListeners() {
      * @private
      */
     async _cleanupEventListeners() {
+        console.log('Performing comprehensive event listener cleanup...');
+        
+        // 1. Clear batch processing
+        if (this._batchTimeout) {
+            clearTimeout(this._batchTimeout);
+            this._batchTimeout = null;
+        }
+        
+        // 2. Process any remaining messages in batch
+        if (this._messageBatch && this._messageBatch.length > 0 && !this._batchProcessing) {
+            await this._processMessageBatch();
+        }
+        
+        // 3. Clean up exposed functions from window
         if (this._attachedListeners && this._attachedListeners.length > 0) {
-            console.log('Cleaning up event listeners...');
             for (const listener of this._attachedListeners) {
                 try {
                     await this.pupPage.evaluate((funcName) => {
                         if (window[funcName]) {
-                            // Remove the exposed function from window
+                            // Remove all event bindings first
+                            const storeEvents = [
+                                'Msg', 'AppState', 'Conn', 'Call', 'Chat', 
+                                'AddonReactionTable', 'AddonPollVoteTable'
+                            ];
+                            
+                            storeEvents.forEach(store => {
+                                if (window.Store && window.Store[store]) {
+                                    window.Store[store].off('change');
+                                    window.Store[store].off('change:type');
+                                    window.Store[store].off('change:ack');
+                                    window.Store[store].off('change:isUnsentMedia');
+                                    window.Store[store].off('remove');
+                                    window.Store[store].off('change:body');
+                                    window.Store[store].off('change:caption');
+                                    window.Store[store].off('change:state');
+                                    window.Store[store].off('change:battery');
+                                    window.Store[store].off('add');
+                                    window.Store[store].off('change:archive');
+                                    window.Store[store].off('change:unreadCount');
+                                }
+                            });
+                            
+                            // Remove the exposed function
                             delete window[funcName];
                         }
                     }, listener.funcName);
                 } catch (error) {
-                    console.error('Error cleaning up listener:', error);
+                    console.error('Error cleaning up listener:', listener.funcName, error);
                 }
             }
             this._attachedListeners = [];
         }
+        
+        // 4. Clear all cleanup callbacks
+        if (this._cleanupCallbacks) {
+            this._cleanupCallbacks.forEach(callback => {
+                try {
+                    callback();
+                } catch (e) {
+                    console.error('Error in cleanup callback:', e);
+                }
+            });
+            this._cleanupCallbacks = [];
+        }
+        
+        // 5. Reset tracking flags
         this._listenersAttached = false;
+        this._batchProcessing = false;
+        
+        console.log('Event listener cleanup completed');
     }
     /**
      * Initialize web version cache with proper cleanup
@@ -1166,19 +1291,52 @@ async attachEventListeners() {
      * Closes the client with proper resource cleanup
      */
     async destroy() {
+        console.log('Starting comprehensive client destruction...');
+        
         try {
-            // ✅ ADD: Clear tracked intervals from constructor
+            // 🔴 FIX: Proper cleanup order with error isolation
+            
+            // 1. Stop all intervals and timeouts FIRST
             if (this._activeIntervals) {
                 this._activeIntervals.forEach(clearInterval);
                 this._activeIntervals.clear();
             }
             
-            // ✅ ADD: Clear event handlers from constructor
+            if (this._stateCheckInterval) {
+                clearInterval(this._stateCheckInterval);
+                this._stateCheckInterval = null;
+            }
+
+            // 🔴 FIX: Clear batch processing
+            if (this._batchTimeout) {
+                clearTimeout(this._batchTimeout);
+                this._batchTimeout = null;
+            }
+            
+            // Process any remaining messages
+            if (this._messageBatch && this._messageBatch.length > 0 && !this._batchProcessing) {
+                try {
+                    await this._processMessageBatch();
+                } catch (error) {
+                    console.warn('Error processing final message batch:', error);
+                }
+            }
+
+            // 2. Clean up event listeners
+            if (this._listenersAttached) {
+                try {
+                    await this._cleanupEventListeners();
+                } catch (error) {
+                    console.error('Error cleaning up event listeners:', error);
+                }
+            }
+
+            // 3. Clear event handlers
             if (this._eventHandlers) {
                 this._eventHandlers.clear();
             }
-            
-            // ✅ ADD: Run cleanup callbacks from constructor
+
+            // 4. Run cleanup callbacks with error handling
             if (this._cleanupCallbacks) {
                 this._cleanupCallbacks.forEach(callback => {
                     try { 
@@ -1189,42 +1347,98 @@ async attachEventListeners() {
                 });
                 this._cleanupCallbacks = [];
             }
-            
-            // ✅ ADD: Clean up event listeners if they were attached
-            if (this._listenersAttached) {
-                await this._cleanupEventListeners();
+
+            // 5. Clear caches to free memory
+            if (this._chatCache) this._chatCache.clear();
+            if (this._contactCache) this._contactCache.clear();
+            if (this._messageCache) this._messageCache.clear();
+            if (this._cacheTimestamps) this._cacheTimestamps.clear();
+
+            // 6. Clean up page context intervals (with error handling)
+            if (this.pupPage) {
+                try {
+                    await this.pupPage.evaluate(() => {
+                        // Clear known intervals
+                        if (window.codeInterval) {
+                            clearInterval(window.codeInterval);
+                            window.codeInterval = null;
+                        }
+                        
+                        // Clear any other intervals with 'Interval' in name
+                        Object.keys(window).forEach(key => {
+                            if (key.includes('Interval') && window[key] && typeof window[key] === 'number') {
+                                clearInterval(window[key]);
+                                window[key] = null;
+                            }
+                        });
+                    }).catch(error => {
+                        console.warn('Error cleaning page intervals:', error);
+                    });
+                } catch (error) {
+                    console.warn('Error accessing page for interval cleanup:', error);
+                }
             }
 
-            // 🟡 KEEP: Your existing interval cleanup in page context
-            await this.pupPage.evaluate(() => {
-                if (window.codeInterval) {
-                    clearInterval(window.codeInterval);
-                    window.codeInterval = null;
-                }
-                // Clear any other potential intervals
-                Object.keys(window).forEach(key => {
-                    if (key.includes('Interval') && window[key]) {
-                        clearInterval(window[key]);
-                        window[key] = null;
-                    }
-                });
-            });
-
-            // 🟡 KEEP: Your existing network event listener cleanup
-            if (this._requestHandlers) {
+            // 7. Remove network event listeners
+            if (this._requestHandlers && this.pupPage) {
                 this._requestHandlers.forEach(({ type, handler }) => {
-                    this.pupPage.off(type, handler);
+                    try {
+                        this.pupPage.off(type, handler);
+                    } catch (error) {
+                        console.warn('Error removing network handler:', error);
+                    }
                 });
                 this._requestHandlers = [];
             }
 
-            // 🟡 KEEP: Your existing browser and auth cleanup
-            await this.pupBrowser.close();
-            await this.authStrategy.destroy();
+            // 🔴 FIX: Close resources in proper order
             
-            console.log('Client destroyed successfully with full resource cleanup');
+            // 8. Close browser (if connected)
+            if (this.pupBrowser && this.pupBrowser.isConnected && this.pupBrowser.isConnected()) {
+                try {
+                    await this.pupBrowser.close();
+                    console.log('Browser closed successfully');
+                } catch (error) {
+                    console.warn('Error closing browser:', error);
+                }
+                this.pupBrowser = null;
+            }
+
+            // 9. Destroy auth strategy
+            if (this.authStrategy && typeof this.authStrategy.destroy === 'function') {
+                try {
+                    await this.authStrategy.destroy();
+                    console.log('Auth strategy destroyed successfully');
+                } catch (error) {
+                    console.warn('Error destroying auth strategy:', error);
+                }
+            }
+
+            // 🔴 FIX: Reset all state to prevent memory leaks
+            this._connectionState = 'DISCONNECTED';
+            this._listenersAttached = false;
+            this._batchProcessing = false;
+            this.pupPage = null;
+            this.info = null;
+            this.interface = null;
+            
+            // Clear any remaining arrays
+            this._messageBatch = [];
+            this._attachedListeners = [];
+            this._cleanupCallbacks = [];
+
+            console.log('Client destruction completed successfully');
+            
         } catch (error) {
-            console.error('Error during client destruction:', error);
+            console.error('Critical error during client destruction:', error);
+            // Even if there's an error, try to clean up as much as possible
+            try {
+                if (this.pupBrowser) {
+                    await this.pupBrowser.close().catch(() => {});
+                }
+            } catch (finalError) {
+                console.error('Final cleanup also failed:', finalError);
+            }
         }
     }
 
