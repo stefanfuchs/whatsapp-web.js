@@ -1663,6 +1663,19 @@ async attachEventListeners() {
  */
 async sendMessage(chatId, content, options = {}) {
     // ✅ FIX: Better LID address handling
+    if (!this.pupPage || this.pupPage.isClosed()) {
+        console.error('sendMessage: Page is closed, cannot send message');
+        
+        // Emit failure event instead of crashing
+        if (this.emit) {
+            this.emit(Events.MESSAGE_SEND_FAILURE, {
+                chatId: chatId,
+                error: 'Page session closed',
+                timestamp: Date.now()
+            });
+        }
+        return undefined;
+    }
     const originalChatId = chatId;
     if (chatId.endsWith('@lid')) {
         try {
@@ -1970,24 +1983,36 @@ async sendMessage(chatId, content, options = {}) {
      * @param {string} chatId 
      * @returns {Promise<Chat|Channel>}
      */
-    async getChatById(chatId) {
-        const CACHE_TTL = 30000; // 30 seconds cache
-        
-        // ✅ Check cache first (HUGE performance boost)
-        const now = Date.now();
-        const cached = this._chatCache.get(chatId);
-        if (cached && (now - cached.timestamp) < CACHE_TTL) {
-            return cached.data;
-        }
-        
-        // ✅ If not in cache, fetch from WhatsApp
+/**
+ * Gets chat or channel instance by ID with performance caching
+ * @param {string} chatId 
+ * @returns {Promise<Chat|Channel>}
+ */
+async getChatById(chatId) {
+    // ✅ ADD: Session validation at the start
+    if (!this.pupPage || this.pupPage.isClosed()) {
+        console.error('getChatById: Page is closed, cannot get chat');
+        return undefined;
+    }
+
+    const CACHE_TTL = 30000;
+    
+    // Check cache first
+    const now = Date.now();
+    const cached = this._chatCache.get(chatId);
+    if (cached && (now - cached.timestamp) < CACHE_TTL) {
+        return cached.data;
+    }
+    
+    // ✅ ADD: Try-catch wrapper for the main operation
+    try {
         const chat = await this.pupPage.evaluate(async (chatId) => {
             return await window.WWebJS.getChat(chatId);
         }, chatId);
         
         const result = chat ? ChatFactory.create(this, chat) : undefined;
         
-        // ✅ Cache the result
+        // Cache the result
         if (result) {
             this._chatCache.set(chatId, {
                 data: result,
@@ -1996,7 +2021,16 @@ async sendMessage(chatId, content, options = {}) {
         }
         
         return result;
+    } catch (error) {
+        // ✅ ADD: Handle session closure errors gracefully
+        if (error.message.includes('Session closed') || error.message.includes('page has been closed')) {
+            console.error('getChatById: Session closed during operation for chat:', chatId);
+            return undefined;
+        }
+        console.error('getChatById: Error getting chat:', error);
+        return undefined;
     }
+}
 
     /**
      * Clear expired cache entries (call this periodically)
