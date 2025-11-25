@@ -85,7 +85,12 @@ class Client extends EventEmitter {
             this._connectionState = 'DISCONNECTED';
             this._lastStateCheck = 0;
             this._stateCheckInterval = null;
-            
+            // ✅ ADD THESE MISSING VARIABLES:
+            this._messageBatch = [];          // Add this
+            this._batchTimeout = null;        // Add this  
+            this._batchProcessing = false;    // Add this
+            this._requestHandlers = [];       // Add this
+             this._cleanupInterval = null;     // ✅ ADD: Cache cleanup interval
             if(!this.options.authStrategy) {
                 this.authStrategy = new NoAuth();
             } else {
@@ -389,6 +394,116 @@ class Client extends EventEmitter {
         this.emit(Events.READY);
         this.authStrategy.afterAuthReady();
     }
+
+
+/**
+ * Safe cleanup method to prevent memory leaks during errors
+ * @private
+ */
+async _safeCleanup() {
+    try {
+        console.log('Performing safe cleanup...');
+        
+        // 1. Clear all intervals and timeouts
+        if (this._activeIntervals) {
+            this._activeIntervals.forEach(clearInterval);
+            this._activeIntervals.clear();
+        }
+        
+        if (this._stateCheckInterval) {
+            clearInterval(this._stateCheckInterval);
+            this._stateCheckInterval = null;
+        }
+
+        // 2. Clear batch processing
+        if (this._batchTimeout) {
+            clearTimeout(this._batchTimeout);
+            this._batchTimeout = null;
+        }
+
+        // 3. Clear message batch
+        if (this._messageBatch) {
+            this._messageBatch.length = 0;
+        }
+
+        // 4. Clear page intervals safely
+        if (this.pupPage && !this.pupPage.isClosed()) {
+            await this.pupPage.evaluate(() => {
+                // Clear known intervals
+                if (window.codeInterval) {
+                    clearInterval(window.codeInterval);
+                    window.codeInterval = null;
+                }
+                
+                // Clear any other intervals
+                Object.keys(window).forEach(key => {
+                    if (key.includes('Interval') && window[key] && typeof window[key] === 'number') {
+                        clearInterval(window[key]);
+                        window[key] = null;
+                    }
+                });
+            }).catch(error => {
+                // Silent fail - page might be closed
+                console.warn('Page cleanup warning:', error.message);
+            });
+        }
+
+        // 5. Clear caches
+        if (this._chatCache) this._chatCache.clear();
+        if (this._contactCache) this._contactCache.clear();
+        if (this._messageCache) this._messageCache.clear();
+        if (this._cacheTimestamps) this._cacheTimestamps.clear();
+
+        console.log('Safe cleanup completed');
+        
+    } catch (error) {
+        console.error('Error during safe cleanup:', error);
+        // Don't throw - this is cleanup, we want to proceed
+    }
+}
+/**
+ * Process batched messages to improve performance
+ * @private
+ */
+async _processMessageBatch() {
+    if (this._batchProcessing || this._messageBatch.length === 0) return;
+    
+    this._batchProcessing = true;
+    const batchToProcess = [...this._messageBatch];
+    this._messageBatch = [];
+    
+    try {
+        for (const msg of batchToProcess) {
+            if (msg.type === 'gp2') {
+                const notification = new GroupNotification(this, msg);
+                if (['add', 'invite', 'linked_group_join'].includes(msg.subtype)) {
+                    this.emit(Events.GROUP_JOIN, notification);
+                } else if (msg.subtype === 'remove' || msg.subtype === 'leave') {
+                    this.emit(Events.GROUP_LEAVE, notification);
+                } else if (msg.subtype === 'promote' || msg.subtype === 'demote') {
+                    this.emit(Events.GROUP_ADMIN_CHANGED, notification);
+                } else if (msg.subtype === 'membership_approval_request') {
+                    this.emit(Events.GROUP_MEMBERSHIP_REQUEST, notification);
+                } else {
+                    this.emit(Events.GROUP_UPDATE, notification);
+                }
+            } else {
+                const message = new Message(this, msg);
+                this.emit(Events.MESSAGE_CREATE, message);
+                if (!msg.id.fromMe) {
+                    this.emit(Events.MESSAGE_RECEIVED, message);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error processing message batch:', error);
+    } finally {
+        this._batchProcessing = false;
+    }
+}
+
+
+
 
     // ✅ ADD: Store injection with retry logic
     async _injectStoreWithRetry(isCometOrAbove) {
@@ -1556,6 +1671,19 @@ async attachEventListeners() {
  */
 async sendMessage(chatId, content, options = {}) {
     // ✅ FIX: Better LID address handling
+    if (!this.pupPage || this.pupPage.isClosed()) {
+        console.error('sendMessage: Page is closed, cannot send message');
+        
+        // Emit failure event instead of crashing
+        if (this.emit) {
+            this.emit(Events.MESSAGE_SEND_FAILURE, {
+                chatId: chatId,
+                error: 'Page session closed',
+                timestamp: Date.now()
+            });
+        }
+        return undefined;
+    }
     const originalChatId = chatId;
     if (chatId.endsWith('@lid')) {
         try {
@@ -1602,6 +1730,90 @@ async sendMessage(chatId, content, options = {}) {
             console.error('Error converting LID address:', error.message);
             // Continue with original chatId - sometimes WhatsApp can handle LID directly
         }
+    }
+    
+    if (internalOptions.sendMediaAsSticker && internalOptions.media) {
+        internalOptions.media = await Util.formatToWebpSticker(
+            internalOptions.media, {
+                name: options.stickerName,
+                author: options.stickerAuthor,
+                categories: options.stickerCategories
+            }, this.pupPage
+        );
+    }
+
+    // ✅ SAFE FIX: Enhanced error handling WITHOUT retry loops
+    try {
+        const sentMsg = await this.pupPage.evaluate(async (chatId, content, options, sendSeen, originalChatId) => {
+            try {
+                let chat;
+                
+                // First try with the converted chatId
+                try {
+                    chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+                } catch (error) {
+                    console.log(`Chat not found with converted ID ${chatId}, trying original: ${originalChatId}`);
+                    // If converted ID fails, try the original LID
+                    if (originalChatId !== chatId) {
+                        chat = await window.WWebJS.getChat(originalChatId, { getAsModel: false });
+                    }
+                }
+                
+                if (!chat) {
+                    console.error('sendMessage: Chat not found for ID:', chatId, 'or original:', originalChatId);
+                    return null;
+                }
+
+                // ✅ ADD: Connection state check
+                if (window.Store && window.Store.AppState) {
+                    const state = window.Store.AppState.state;
+                    if (state !== 'CONNECTED') {
+                        console.error('sendMessage: WhatsApp not connected. State:', state);
+                        return null;
+                    }
+                }
+
+                if (sendSeen) {
+                    await window.WWebJS.sendSeen(chat.id._serialized).catch(err => {
+                        console.warn('sendMessage: sendSeen failed:', err.message);
+                        // Continue anyway - don't fail the entire message
+                    });
+                }
+
+                const msg = await window.WWebJS.sendMessage(chat, content, options);
+                
+                if (!msg) {
+                    console.error('sendMessage: WWebJS.sendMessage returned null/undefined');
+                    return null;
+                }
+                
+                return window.WWebJS.getMessageModel(msg);
+                
+            } catch (error) {
+                console.error('sendMessage: Browser context error:', error);
+                return null;
+            }
+        }, chatId, content, internalOptions, sendSeen, originalChatId);
+
+        if (sentMsg) {
+            return new Message(this, sentMsg);
+        } else {
+            console.error('sendMessage: Failed to send message to chat. Original:', originalChatId, 'Converted:', chatId);
+            return undefined;
+        }
+        
+    } catch (error) {
+        // ✅ SAFE: Log error but don't retry (prevents bans)
+        console.error('sendMessage: Critical error:', error);
+        
+        // ✅ EMIT ERROR EVENT for user handling
+        this.emit(Events.MESSAGE_SEND_FAILURE, {
+            chatId: originalChatId,
+            error: error.message,
+            timestamp: Date.now()
+        });
+        
+        return undefined;
     }
 
     const isChannel = /@\w*newsletter\b/.test(chatId);
@@ -1863,24 +2075,36 @@ async sendMessage(chatId, content, options = {}) {
      * @param {string} chatId 
      * @returns {Promise<Chat|Channel>}
      */
-    async getChatById(chatId) {
-        const CACHE_TTL = 30000; // 30 seconds cache
-        
-        // ✅ Check cache first (HUGE performance boost)
-        const now = Date.now();
-        const cached = this._chatCache.get(chatId);
-        if (cached && (now - cached.timestamp) < CACHE_TTL) {
-            return cached.data;
-        }
-        
-        // ✅ If not in cache, fetch from WhatsApp
+/**
+ * Gets chat or channel instance by ID with performance caching
+ * @param {string} chatId 
+ * @returns {Promise<Chat|Channel>}
+ */
+async getChatById(chatId) {
+    // ✅ ADD: Session validation at the start
+    if (!this.pupPage || this.pupPage.isClosed()) {
+        console.error('getChatById: Page is closed, cannot get chat');
+        return undefined;
+    }
+
+    const CACHE_TTL = 30000;
+    
+    // Check cache first
+    const now = Date.now();
+    const cached = this._chatCache.get(chatId);
+    if (cached && (now - cached.timestamp) < CACHE_TTL) {
+        return cached.data;
+    }
+    
+    // ✅ ADD: Try-catch wrapper for the main operation
+    try {
         const chat = await this.pupPage.evaluate(async (chatId) => {
             return await window.WWebJS.getChat(chatId);
         }, chatId);
         
         const result = chat ? ChatFactory.create(this, chat) : undefined;
         
-        // ✅ Cache the result
+        // Cache the result
         if (result) {
             this._chatCache.set(chatId, {
                 data: result,
@@ -1889,7 +2113,16 @@ async sendMessage(chatId, content, options = {}) {
         }
         
         return result;
+    } catch (error) {
+        // ✅ ADD: Handle session closure errors gracefully
+        if (error.message.includes('Session closed') || error.message.includes('page has been closed')) {
+            console.error('getChatById: Session closed during operation for chat:', chatId);
+            return undefined;
+        }
+        console.error('getChatById: Error getting chat:', error);
+        return undefined;
     }
+}
 
     /**
      * Clear expired cache entries (call this periodically)
@@ -2732,7 +2965,7 @@ async getContactById(contactId) {
      * @returns {Promise<boolean>} Returns true if the operation completed successfully, false otherwise
      */
     async deleteChannel(channelId) {
-        return await this.client.pupPage.evaluate(async (channelId) => {
+        return await this.pupPage.evaluate(async (channelId) => {
             const channel = await window.WWebJS.getChat(channelId, { getAsModel: false });
             if (!channel) return false;
             try {
