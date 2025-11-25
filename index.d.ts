@@ -1017,43 +1017,47 @@ declare namespace WAWebJS {
 
     /** Events that can be emitted by the client */
     export enum Events {
-        AUTHENTICATED = "authenticated",
-        AUTHENTICATION_FAILURE = "auth_failure",
-        READY = "ready",
-        MESSAGE_RECEIVED = "message",
-        MESSAGE_CIPHERTEXT = "message_ciphertext",
-        MESSAGE_CREATE = "message_create",
-        MESSAGE_REVOKED_EVERYONE = "message_revoke_everyone",
-        MESSAGE_REVOKED_ME = "message_revoke_me",
-        MESSAGE_ACK = "message_ack",
-        MESSAGE_EDIT = "message_edit",
-        MEDIA_UPLOADED = "media_uploaded",
-        CONTACT_CHANGED = "contact_changed",
-        GROUP_JOIN = "group_join",
-        GROUP_LEAVE = "group_leave",
-        GROUP_ADMIN_CHANGED = "group_admin_changed",
-        GROUP_MEMBERSHIP_REQUEST = "group_membership_request",
-        GROUP_UPDATE = "group_update",
-        QR_RECEIVED = "qr",
-        LOADING_SCREEN = "loading_screen",
-        DISCONNECTED = "disconnected",
-        STATE_CHANGED = "change_state",
-        BATTERY_CHANGED = "change_battery",
-        REMOTE_SESSION_SAVED = "remote_session_saved",
-        CALL = "call",
+        AUTHENTICATED = 'authenticated',
+        AUTHENTICATION_FAILURE = 'auth_failure',
+        READY = 'ready',
+        MESSAGE_RECEIVED = 'message',
+        MESSAGE_CIPHERTEXT = 'message_ciphertext',
+        MESSAGE_CREATE = 'message_create',
+        MESSAGE_REVOKED_EVERYONE = 'message_revoke_everyone',
+        MESSAGE_REVOKED_ME = 'message_revoke_me',
+        MESSAGE_ACK = 'message_ack',
+        MESSAGE_EDIT = 'message_edit',
+        MEDIA_UPLOADED = 'media_uploaded',
+        CONTACT_CHANGED = 'contact_changed',
+        GROUP_JOIN = 'group_join',
+        GROUP_LEAVE = 'group_leave',
+        GROUP_ADMIN_CHANGED = 'group_admin_changed',
+        GROUP_MEMBERSHIP_REQUEST = 'group_membership_request',
+        GROUP_UPDATE = 'group_update',
+        QR_RECEIVED = 'qr',
+        CODE_RECEIVED = 'code',
+        LOADING_SCREEN = 'loading_screen',
+        DISCONNECTED = 'disconnected',
+        STATE_CHANGED = 'change_state',
+        BATTERY_CHANGED = 'change_battery',
+        REMOTE_SESSION_SAVED = 'remote_session_saved',
+        INCOMING_CALL = 'call',
+        VOTE_UPDATE = 'vote_update',
     }
 
     /** Group notification types */
     export enum GroupNotificationTypes {
-        ADD = "add",
-        INVITE = "invite",
-        REMOVE = "remove",
-        LEAVE = "leave",
-        SUBJECT = "subject",
-        DESCRIPTION = "description",
-        PICTURE = "picture",
-        ANNOUNCE = "announce",
-        RESTRICT = "restrict",
+        ADD = 'add',
+        INVITE = 'invite',
+        REMOVE = 'remove',
+        LEAVE = 'leave',
+        PROMOTE = 'promote',
+        DEMOTE = 'demote',
+        SUBJECT = 'subject',
+        DESCRIPTION = 'description',
+        PICTURE = 'picture',
+        ANNOUNCE = 'announce',
+        RESTRICT = 'restrict',
     }
 
     /** Message ACK */
@@ -1068,43 +1072,44 @@ declare namespace WAWebJS {
 
     /** Message types */
     export enum MessageTypes {
-        TEXT = "chat",
-        AUDIO = "audio",
-        VOICE = "ptt",
-        IMAGE = "image",
-        VIDEO = "video",
-        DOCUMENT = "document",
-        STICKER = "sticker",
-        LOCATION = "location",
-        CONTACT_CARD = "vcard",
-        CONTACT_CARD_MULTI = "multi_vcard",
-        REVOKED = "revoked",
-        ORDER = "order",
-        PRODUCT = "product",
-        PAYMENT = "payment",
-        UNKNOWN = "unknown",
-        GROUP_INVITE = "groups_v4_invite",
-        LIST = "list",
-        LIST_RESPONSE = "list_response",
-        BUTTONS_RESPONSE = "buttons_response",
-        BROADCAST_NOTIFICATION = "broadcast_notification",
-        CALL_LOG = "call_log",
-        CIPHERTEXT = "ciphertext",
-        DEBUG = "debug",
-        E2E_NOTIFICATION = "e2e_notification",
-        GP2 = "gp2",
-        GROUP_NOTIFICATION = "group_notification",
-        HSM = "hsm",
-        INTERACTIVE = "interactive",
-        NATIVE_FLOW = "native_flow",
-        NOTIFICATION = "notification",
-        NOTIFICATION_TEMPLATE = "notification_template",
-        OVERSIZED = "oversized",
-        PROTOCOL = "protocol",
-        REACTION = "reaction",
-        TEMPLATE_BUTTON_REPLY = "template_button_reply",
-        POLL_CREATION = "poll_creation",
-        SCHEDULED_EVENT_CREATION = "scheduled_event_creation",
+        TEXT = 'chat',
+        AUDIO = 'audio',
+        VOICE = 'ptt',
+        IMAGE = 'image',
+        ALBUM = 'album',
+        VIDEO = 'video',
+        DOCUMENT = 'document',
+        STICKER = 'sticker',
+        LOCATION = 'location',
+        CONTACT_CARD = 'vcard',
+        CONTACT_CARD_MULTI = 'multi_vcard',
+        REVOKED = 'revoked',
+        ORDER = 'order',
+        PRODUCT = 'product',
+        PAYMENT = 'payment',
+        UNKNOWN = 'unknown',
+        GROUP_INVITE = 'groups_v4_invite',
+        LIST = 'list',
+        LIST_RESPONSE = 'list_response',
+        BUTTONS_RESPONSE = 'buttons_response',
+        BROADCAST_NOTIFICATION = 'broadcast_notification',
+        CALL_LOG = 'call_log',
+        CIPHERTEXT = 'ciphertext',
+        DEBUG = 'debug',
+        E2E_NOTIFICATION = 'e2e_notification',
+        GP2 = 'gp2',
+        GROUP_NOTIFICATION = 'group_notification',
+        HSM = 'hsm',
+        INTERACTIVE = 'interactive',
+        NATIVE_FLOW = 'native_flow',
+        NOTIFICATION = 'notification',
+        NOTIFICATION_TEMPLATE = 'notification_template',
+        OVERSIZED = 'oversized',
+        PROTOCOL = 'protocol',
+        REACTION = 'reaction',
+        TEMPLATE_BUTTON_REPLY = 'template_button_reply',
+        POLL_CREATION = 'poll_creation',
+        SCHEDULED_EVENT_CREATION = 'scheduled_event_creation',
     }
 
     /** Client status */
@@ -1448,7 +1453,7 @@ declare namespace WAWebJS {
         endTime?: Date;
         /** The location of the event */
         location?: string;
-        /** The type of a WhatsApp call link to generate, valid values are: `video` | `voice` */
+        /** The type of a WhatsApp call link to generate, valid values are: `video` | `voice` | `none` */
         callType?: string;
         /**
          * Indicates if a scheduled event should be sent as an already canceled
@@ -1475,7 +1480,7 @@ declare namespace WAWebJS {
             messageSecret?: string;
         };
 
-        constructor(name: string, startTime: Date, options?: EventSendOptions);
+        constructor(name: string, startTime: Date, options?: ScheduledEventSendOptions)
     }
 
     /** Represents a Poll Vote on WhatsApp */
