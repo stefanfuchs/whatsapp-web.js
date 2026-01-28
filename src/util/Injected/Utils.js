@@ -639,7 +639,12 @@ exports.LoadUtils = () => {
         if (chat.groupMetadata) {
             model.isGroup = true;
             const chatWid = window.Store.WidFactory.createWid(chat.id._serialized);
-            await window.Store.GroupMetadata.update(chatWid);
+
+            if (window.Store.GroupMetadata)
+                await window.Store.GroupMetadata.update(chatWid)
+            else if (window.Store.WAWebGroupMetadataCollection)
+                await window.Store.WAWebGroupMetadataCollection.update(chatWid)
+
             chat.groupMetadata.participants._models
                 .filter(x => x.id?._serialized?.endsWith('@lid'))
                 .forEach(x => x.contact?.phoneNumber && (x.id = x.contact.phoneNumber));
