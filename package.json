@@ -1,9 +1,9 @@
 {
-  "name": "@stefanfuchs/whatsapp-web.js",
+  "name": "@stefanfuchs/whatsapp-web.js-omix01",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
   },
-  "version": "1.34.5-alpha.4",
+  "version": "1.34.5-alpha.5",
   "description": "Library for interacting with the WhatsApp Web API ",
   "main": "./index.js",
   "typings": "./index.d.ts",
