@@ -209,7 +209,80 @@ exports.ExposeStore = () => {
         ...window.require('WAWebStatusGatingUtils')
     };
 
-    if (!window.Store.Chat._find || !window.Store.Chat.findImpl) {
+    // =====================================================
+    // Fallback loading for modules that may have moved in WWeb 2.3000.x
+    // These modules might no longer be in WAWebCollections
+    // =====================================================
+    // https://github.com/pedroslopez/whatsapp-web.js/compare/main...timothydillan:whatsapp-web.js:fix/duplicate-events-and-bindings
+
+    // GroupMetadata moved to WAWebGroupMetadataCollection
+    if (!window.Store.GroupMetadata) {
+        try {
+            const mod = window.require('WAWebGroupMetadataCollection');
+            window.Store.GroupMetadata = mod?.GroupMetadata ?? mod?.default;
+        } catch {
+            // Module doesn't exist in older versions
+        }
+    }
+
+    // Msg collection - critical for message events
+    if (!window.Store.Msg) {
+        try {
+            const mod = window.require('WAWebMsgCollection');
+            window.Store.Msg = mod?.Msg ?? mod?.MsgCollection ?? mod?.default;
+        } catch {
+            // Try alternative module name
+            try {
+                const mod = window.require('WAWebMessageCollection');
+                window.Store.Msg = mod?.Msg ?? mod?.default;
+            } catch {
+                // Module doesn't exist
+            }
+        }
+    }
+
+    // Chat collection - critical for chat events
+    if (!window.Store.Chat) {
+        try {
+            const mod = window.require('WAWebChatCollection');
+            window.Store.Chat = mod?.Chat ?? mod?.ChatCollection ?? mod?.default;
+        } catch {
+            // Module doesn't exist
+        }
+    }
+
+    // Call collection - for incoming call events
+    if (!window.Store.Call) {
+        try {
+            const mod = window.require('WAWebCallCollection');
+            window.Store.Call = mod?.Call ?? mod?.CallCollection ?? mod?.default;
+        } catch {
+            // Module doesn't exist
+        }
+    }
+
+    // AppState fallback - critical for disconnected event
+    if (!window.Store.AppState) {
+        try {
+            // Try alternative module names
+            const mod = window.require('WAWebAppStateModel') ?? window.require('WAWebSocketAppState');
+            window.Store.AppState = mod?.Socket ?? mod?.AppState ?? mod?.default;
+        } catch {
+            // Module doesn't exist
+        }
+    }
+
+    // Conn fallback - for battery/connection events
+    if (!window.Store.Conn) {
+        try {
+            const mod = window.require('WAWebConnCollection');
+            window.Store.Conn = mod?.Conn ?? mod?.default;
+        } catch {
+            // Module doesn't exist
+        }
+    }
+
+    if (window.Store.Chat && (!window.Store.Chat._find || !window.Store.Chat.findImpl)) {
         window.Store.Chat._find = e => {
             const target = window.Store.Chat.get(e);
             return target ? Promise.resolve(target) : Promise.resolve({
