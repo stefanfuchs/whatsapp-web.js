@@ -1254,7 +1254,7 @@ class Client extends EventEmitter {
         let contact = await this.pupPage.evaluate(contactId => {
             return window.WWebJS.getContact(contactId);
         }, contactId);
-
+        if (!contact) return null;
         return ContactFactory.create(this, contact);
     }
 
@@ -1585,7 +1585,7 @@ class Client extends EventEmitter {
                 throw err;
             }
         }, contactId);
-        
+
         return profilePic ? profilePic.eurl : undefined;
     }
 

@@ -705,13 +705,38 @@ exports.LoadUtils = () => {
     };
 
     window.WWebJS.getContact = async contactId => {
+        // applied updates from:
+        //  https://github.com/pedroslopez/whatsapp-web.js/issues/127054
+        
         const wid = window.Store.WidFactory.createWid(contactId);
-        let contact = await window.Store.Contact.find(wid);
-        if (contact.id._serialized.endsWith('@lid')) {
+
+        // Try sync cache first (like getChatById does with Store.Chat.get)
+        let contact = window.Store.Contact.get(wid);
+
+        // If not in cache, try async server fetch
+        if (!contact) {
+            try {
+                contact = await window.Store.Contact.find(wid);
+            } catch {
+                // Server fetch failed (e.g., HTTP 400) — continue with null
+            }
+        }
+
+        if (!contact) return null;
+
+        if (contact.id && contact.id._serialized && contact.id._serialized.endsWith('@lid')) {
             contact.id = contact.phoneNumber;
         }
-        const bizProfile = await window.Store.BusinessProfile.fetchBizProfile(wid);
-        bizProfile.profileOptions && (contact.businessProfile = bizProfile);
+
+        try {
+            const bizProfile = await window.Store.BusinessProfile.fetchBizProfile(wid);
+            if (bizProfile && bizProfile.profileOptions) {
+                contact.businessProfile = bizProfile;
+            }
+        } catch {
+            // fetchBizProfile is non-essential — proceed without it
+        }
+
         return window.WWebJS.getContactModel(contact);
     };
 
