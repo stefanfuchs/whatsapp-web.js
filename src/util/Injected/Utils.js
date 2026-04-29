@@ -1005,7 +1005,7 @@ exports.LoadUtils = () => {
         return model;
     };
 
-    window.WWebJS.getContactModel = contact => {
+    window.WWebJS.getContactModel = (contact) => {
         if (!contact) return null;
 
         let res = contact.serialize();

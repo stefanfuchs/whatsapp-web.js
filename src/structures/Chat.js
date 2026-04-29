@@ -222,20 +222,20 @@ class Chat extends Base {
                 });
                 let msgs = chat.msgs.getModelsArray().filter(msgFilter);
 
-            if (searchOptions && searchOptions.limit > 0) {
-                while (msgs.length < searchOptions.limit) {
+                if (searchOptions && searchOptions.limit > 0) {
+                    while (msgs.length < searchOptions.limit) {
                         const loadedMessages = await window
                             .require('WAWebChatLoadMessages')
                             .loadEarlierMsgs({ chat });
-                    if (!loadedMessages || !loadedMessages.length) break;
-                    msgs = [...loadedMessages.filter(msgFilter), ...msgs];
+                        if (!loadedMessages || !loadedMessages.length) break;
+                        msgs = [...loadedMessages.filter(msgFilter), ...msgs];
+                    }
+
+                    if (msgs.length > searchOptions.limit) {
+                        msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
+                        msgs = msgs.splice(msgs.length - searchOptions.limit);
+                    }
                 }
-                
-                if (msgs.length > searchOptions.limit) {
-                    msgs.sort((a, b) => (a.t > b.t) ? 1 : -1);
-                    msgs = msgs.splice(msgs.length - searchOptions.limit);
-                }
-            }
 
                 return msgs.map((m) => window.WWebJS.getMessageModel(m));
             },
