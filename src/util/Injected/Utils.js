@@ -625,7 +625,9 @@ exports.LoadUtils = () => {
         await window
             .require('WAWebSendMessageEditAction')
             .sendMessageEdit(msg, content, internalOptions);
-        return window.require('WAWebCollections').Msg.get(msg.id._serialized || msg.id.$1);
+        return window
+            .require('WAWebCollections')
+            .Msg.get(msg.id._serialized || msg.id.$1);
     };
 
     window.WWebJS.toStickerData = async (mediaInfo) => {
@@ -988,7 +990,7 @@ exports.LoadUtils = () => {
         model.lastMessage = null;
         if (model.msgs && model.msgs.length) {
             const _lastReceivedKeyId = chat.lastReceivedKey
-                ? (chat.lastReceivedKey._serialized || chat.lastReceivedKey.$1)
+                ? chat.lastReceivedKey._serialized || chat.lastReceivedKey.$1
                 : null;
             const lastMessage = _lastReceivedKeyId
                 ? window
@@ -997,9 +999,7 @@ exports.LoadUtils = () => {
                   (
                       await window
                           .require('WAWebCollections')
-                          .Msg.getMessagesById([
-                              _lastReceivedKeyId,
-                          ])
+                          .Msg.getMessagesById([_lastReceivedKeyId])
                   )?.messages?.[0]
                 : null;
             lastMessage &&
@@ -1035,13 +1035,20 @@ exports.LoadUtils = () => {
 
         res.isBlocked = contact.isContactBlocked;
         if (!res.isBlocked) {
-            const alt = window
-                .require('WAWebApiContact')
-                .getAlternateUserWid(wid);
-            if (alt) {
-                res.isBlocked = !!window
-                    .require('WAWebCollections')
-                    .Blocklist.get(alt);
+            try {
+                const alt = window
+                    .require('WAWebApiContact')
+                    .getAlternateUserWid(wid);
+                if (alt) {
+                    res.isBlocked = !!window
+                        .require('WAWebCollections')
+                        .Blocklist.get(alt);
+                }
+            } catch (e) {
+                console.error(
+                    '[window.WWebJS.getContactModel] Error checking if contact is blocked:',
+                    e,
+                );
             }
         }
 
@@ -1587,7 +1594,12 @@ exports.LoadUtils = () => {
                                       .membershipRequestsActionRejectParticipantMixins
                                       ?.value.error;
                             return {
-                                requesterId: (() => { const _w = window.require('WAWebWidFactory').createWid(p.jid); return _w._serialized || _w.$1; })(),
+                                requesterId: (() => {
+                                    const _w = window
+                                        .require('WAWebWidFactory')
+                                        .createWid(p.jid);
+                                    return _w._serialized || _w.$1;
+                                })(),
                                 ...(error
                                     ? {
                                           error: +error,
@@ -1604,7 +1616,15 @@ exports.LoadUtils = () => {
                     }
                 } else {
                     result.push({
-                        requesterId: (() => { const _w = window.require('WAWebJidToWid').userJidToUserWid(participant.participantArgs[0].participantJid); return _w._serialized || _w.$1; })(),
+                        requesterId: (() => {
+                            const _w = window
+                                .require('WAWebJidToWid')
+                                .userJidToUserWid(
+                                    participant.participantArgs[0]
+                                        .participantJid,
+                                );
+                            return _w._serialized || _w.$1;
+                        })(),
                         message: 'ServerStatusCodeError',
                     });
                 }
