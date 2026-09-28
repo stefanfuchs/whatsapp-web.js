@@ -170,7 +170,11 @@ class GroupChat extends Chat {
                         isInviteV4Sent: false,
                     };
 
-                    if (groupParticipants.some((p) => (p._serialized || p.$1) === pId)) {
+                    if (
+                        groupParticipants.some(
+                            (p) => (p._serialized || p.$1) === pId,
+                        )
+                    ) {
                         participantData[pId].code = 409;
                         participantData[pId].message = errorCodes[409];
                         continue;
@@ -209,13 +213,10 @@ class GroupChat extends Chat {
                         if (
                             rpcResult.name ===
                                 'ParticipantRequestCodeCanBeSent' &&
-                            (userChat =
-                                window
-                                    .require('WAWebCollections')
-                                    .Chat.get(pWid) ||
-                                (await window
-                                    .require('WAWebCollections')
-                                    .Chat.find(pWid)))
+                            (userChat = await window.WWebJS.getChat(
+                                pWid._serialized,
+                                { getAsModel: false },
+                            ))
                         ) {
                             const groupName =
                                 group.formattedTitle || group.name;
